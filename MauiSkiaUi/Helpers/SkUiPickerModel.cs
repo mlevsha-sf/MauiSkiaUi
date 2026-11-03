@@ -1,7 +1,6 @@
 using System.Collections;
 using System.Diagnostics;
 using MauiSkiaUi.Rendering;
-using Microsoft.Maui.Controls.Shapes;
 using SkiaSharp;
 
 namespace MauiSkiaUi;
@@ -55,8 +54,11 @@ internal interface ISkUiPickerPopupContent
     /// <summary>Whether the content has keyboard focus.</summary>
     bool IsFocused { get; }
 
-    /// <summary>The size the content wants (at least <paramref name="minimumWidth"/>, at most <paramref name="maximumWidth"/> wide).</summary>
-    Size PreferredSize(double minimumWidth, double maximumWidth);
+    /// <summary>
+    /// The size the content wants (at least <paramref name="minimumWidth"/>, at most <paramref name="maximumWidth"/> wide); taller
+    /// than <paramref name="maximumHeight"/> it scrolls, so what is past it need not be measured exactly.
+    /// </summary>
+    Size PreferredSize(double minimumWidth, double maximumWidth, double maximumHeight);
 
     /// <summary>Creates the request that carries the content (and links it back).</summary>
     SkUiPopupRequest CreateRequest(View anchor, View? platformAnchor, in SkUiPopupLayout layout, in SkUiPopupRequestOptions options);
@@ -248,6 +250,26 @@ internal sealed class SkUiPickerModel
     internal bool TokensShown => ShowsTokens && _tokens.Count > 0;
     public DataTemplate? PopupFooterTemplate;
     public bool ShowsClearButton;
+    public bool? ShowsChevron;
+
+    /// <summary>The control's <c>ChevronColor</c>; <c>null</c>: the look's (the text color, dimmed).</summary>
+    public Color? ChevronColor;
+
+    /// <summary>The control's <c>ChevronSize</c>: the chevron's width in DIPs; <c>null</c>: the look's.</summary>
+    public double? ChevronSize;
+
+    /// <summary>The control's <c>ChevronAreaWidth</c>: the room the shown chevron takes; <c>null</c>: the look's <see cref="SkUiLook.PickerChevronWidth"/>.</summary>
+    public double? ChevronAreaWidth;
+
+    /// <summary>The control's <c>TextPadding</c>: the space around the field's text; <c>null</c>: the look's <see cref="SkUiLook.PickerFieldPadding"/>.</summary>
+    public Thickness? Padding;
+
+    /// <summary>The control's <c>LeadingView</c> as measured (the control measures it first); empty without one.</summary>
+    public Size LeadingSize;
+    public bool IsSearchEnabled;
+    public int SearchMinimumItemCount;
+    public Func<object?, string, bool>? SearchFilter;
+    public string? SearchPlaceholder;
     public bool ShowsPopupClearButton;
     public string? ClearText;
     public System.Windows.Input.ICommand? SelectionChangedCommand;
@@ -360,48 +382,92 @@ internal sealed class SkUiPickerModel
     internal SkUiTextStyle TextStyle => new(SkUiTypefaces.Resolve(FontFamily, FontAttributes), SkUiFontScaling.ScaleFontSize(EffectiveFontSize, FontAutoScalingEnabled),
         LineBreakMode.TailTruncation, null, 1, -1, CharacterSpacing, _owner.TextDirection, SkUiTextRendering.Default, FontAttributes);
 
-    /// <summary>Where the text sits in the field: the look's padding, with the chevron's room at the end side.</summary>
+    /// <summary>
+    /// The room the chevron takes at the end side while it shows (the picker's choice, else the look's): the picker's
+    /// <see cref="ChevronAreaWidth"/>, else the look's width (the base look's on a look that keeps none); none while hidden.
+    /// </summary>
+    private double ChevronWidth => (ShowsChevron ?? SkUiLook.Current.PickerShowsChevron) ? ChevronAreaWidth ?? LookChevronWidth : 0;
+
+    private static double LookChevronWidth => SkUiLook.Current.PickerChevronWidth is var width and > 0 ? width : SkUiLook.DefaultPickerChevronWidth;
+
+    /// <summary>The space between the field's edges and its text: the picker's <see cref="Padding"/>, else the look's.</summary>
+    private Thickness FieldPadding => Padding ?? SkUiLook.Current.PickerFieldPadding;
+
+    /// <summary>The room the leading view takes at the start side, after the padding: its width and the look's spacing after it; none without one.</summary>
+    private double LeadingRoom => LeadingSize.Width > 0 ? LeadingSize.Width + SkUiLook.Current.TextFieldAdornmentSpacing : 0;
+
+    /// <summary>The room the chevron and the clear button take at the end side.</summary>
+    private double EndRoom => ChevronWidth + (ClearButtonShown ? SkUiLook.Current.PickerClearButtonWidth : 0);
+
+    /// <summary>Where the text sits in the field: the padding, with the leading view's room at the start side and the chevron's at the end side.</summary>
     private Thickness TextInset
     {
         get
         {
-            var look = SkUiLook.Current;
-            var padding = look.PickerFieldPadding;
-            var chevron = look.PickerChevronWidth + (ClearButtonShown ? look.PickerClearButtonWidth : 0);
+            var padding = FieldPadding;
+            var start = padding.Left + LeadingRoom;
+            var end = padding.Right + EndRoom;
             return _owner.IsRightToLeft
-                ? new Thickness(padding.Right + chevron, padding.Top, padding.Left, padding.Bottom)
-                : new Thickness(padding.Left, padding.Top, padding.Right + chevron, padding.Bottom);
+                ? new Thickness(end, padding.Top, start, padding.Bottom)
+                : new Thickness(start, padding.Top, end, padding.Bottom);
         }
     }
 
     /// <summary>The chevron's rectangle in a field of <paramref name="width"/> × <paramref name="height"/>.</summary>
     private SKRect ChevronBounds(float width, float height)
     {
-        var chevron = (float)SkUiLook.Current.PickerChevronWidth;
+        var chevron = (float)ChevronWidth;
         return _owner.IsRightToLeft ? new SKRect(0, 0, chevron, height) : new SKRect(width - chevron, 0, width, height);
     }
 
     /// <summary>
     /// Where content of the control's own goes in the field (a field template), left to right (drawn children are mirrored in
-    /// right-to-left layouts): the look's padding, with the chevron's and the clear button's room at the end.
+    /// right-to-left layouts): the padding, with the leading view's room at the start and the chevron's and the clear button's at the end.
     /// </summary>
     internal Thickness ContentInset
     {
         get
         {
-            var look = SkUiLook.Current;
-            var padding = look.PickerFieldPadding;
-            return new Thickness(padding.Left, padding.Top, padding.Right + look.PickerChevronWidth + (ClearButtonShown ? look.PickerClearButtonWidth : 0),
-                padding.Bottom);
+            var padding = FieldPadding;
+            return new Thickness(padding.Left + LeadingRoom, padding.Top, padding.Right + EndRoom, padding.Bottom);
         }
+    }
+
+    /// <summary>
+    /// The rectangle to arrange the leading view in, in a field of <paramref name="width"/> × <paramref name="height"/>, left to
+    /// right (the view mirrors itself in right-to-left layouts): its measured size after the start padding, aligned with the text
+    /// (<see cref="VerticalTextAlignment"/>) and kept inside the field.
+    /// </summary>
+    internal Rect LeadingFrame(double width, double height)
+    {
+        var padding = FieldPadding;
+        var size = Math.Min(LeadingSize.Height, height);
+        var top = padding.Top;
+        var bottom = Math.Max(top, height - padding.Bottom);
+        var y = VerticalTextAlignment switch
+        {
+            TextAlignment.Start => top,
+            TextAlignment.End => bottom - size,
+            _ => top + (bottom - top - size) / 2
+        };
+        y = Math.Clamp(y, 0, Math.Max(0, height - size));
+        return new Rect(padding.Left, y, Math.Min(LeadingSize.Width, Math.Max(0, width - padding.Left)), size);
+    }
+
+    /// <summary>The field's height at least the look's touch height (unless the control sets its own) and the leading view's height.</summary>
+    private Size AtLeastMinimumHeight(Size size)
+    {
+        var height = Math.Max(size.Height, LeadingSize.Height);
+        if (!HasExplicitMinimumHeight)
+            height = Math.Max(height, SkUiLook.Current.DefaultPickerMinimumHeight);
+        return new Size(size.Width, height);
     }
 
     /// <summary>The field's size around content of <paramref name="content"/>'s size: the inset, at least the look's touch height.</summary>
     internal Size MeasureAround(Size content)
     {
         var inset = ContentInset;
-        var size = new Size(content.Width + inset.HorizontalThickness, content.Height + inset.VerticalThickness);
-        return HasExplicitMinimumHeight ? size : new Size(size.Width, Math.Max(size.Height, SkUiLook.Current.DefaultPickerMinimumHeight));
+        return AtLeastMinimumHeight(new Size(content.Width + inset.HorizontalThickness, content.Height + inset.VerticalThickness));
     }
 
     /// <summary>Whether the field shows its clear button: it has one and something is chosen.</summary>
@@ -411,7 +477,7 @@ internal sealed class SkUiPickerModel
     private SKRect ClearButtonBounds(float width, float height)
     {
         var look = SkUiLook.Current;
-        var chevron = (float)look.PickerChevronWidth;
+        var chevron = (float)ChevronWidth;
         var clear = (float)look.PickerClearButtonWidth;
         return _owner.IsRightToLeft ? new SKRect(chevron, 0, chevron + clear, height) : new SKRect(width - chevron - clear, 0, width - chevron, height);
     }
@@ -420,7 +486,10 @@ internal sealed class SkUiPickerModel
     public bool HitsClearButton(Point point, double width, double height) =>
         ClearButtonShown && ClearButtonBounds((float)width, (float)height).Contains((float)point.X, (float)point.Y);
 
-    /// <summary>The field's size: the shown text (or the title) with the padding and chevron, at least the look's touch height.</summary>
+    /// <summary>
+    /// The field's size: the shown text (or the title) with the padding, the leading view and the chevron, at least the look's
+    /// touch height and the leading view's height.
+    /// </summary>
     public Size Measure(double widthConstraint, double heightConstraint)
     {
         var inset = TextInset;
@@ -428,16 +497,13 @@ internal sealed class SkUiPickerModel
         {
             var available = Math.Max(0, widthConstraint - inset.HorizontalThickness);
             var block = LayoutTokens(available);
-            var tokensSize = new Size(Math.Min(widthConstraint, block.Width + inset.HorizontalThickness), block.Height + inset.VerticalThickness);
-            return HasExplicitMinimumHeight ? tokensSize : new Size(tokensSize.Width, Math.Max(tokensSize.Height, SkUiLook.Current.DefaultPickerMinimumHeight));
+            return AtLeastMinimumHeight(new Size(Math.Min(widthConstraint, block.Width + inset.HorizontalThickness), block.Height + inset.VerticalThickness));
         }
         var text = DisplayText;
         var size = text.Length == 0
             ? new Size(inset.HorizontalThickness, inset.VerticalThickness + SkUiFontScaling.ScaleFontSize(EffectiveFontSize, FontAutoScalingEnabled) * 1.2)
             : _layout.Measure(text, TextStyle, inset, widthConstraint, heightConstraint);
-        if (!HasExplicitMinimumHeight)
-            size = new Size(size.Width, Math.Max(size.Height, SkUiLook.Current.DefaultPickerMinimumHeight));
-        return size;
+        return AtLeastMinimumHeight(size);
     }
 
     /// <summary>Draws the field: the look's chrome and chevron, then the text (the selection's, or the title in the title color).</summary>
@@ -446,7 +512,13 @@ internal sealed class SkUiPickerModel
         var foreground = ToSkColor(TextColor ?? SkUiColors.DefaultForeground);
         SkUiLook.Current.DrawPickerField(canvas, new SkUiPickerFieldPaint(new SKRect(0, 0, width, height), ChevronBounds(width, height),
             ToSkColor(SkUiColors.Accent), ToSkColor(SkUiColors.Muted), foreground, _focus.Value, _open.Value, _press?.Visual ?? SkUiPressVisual.None,
-            IsPointerOver, IsEnabled, _owner.IsRightToLeft) { Style = FieldStyle, Chrome = Chrome.ToPaint() });
+            IsPointerOver, IsEnabled, _owner.IsRightToLeft)
+        {
+            Style = FieldStyle,
+            Chrome = Chrome.ToPaint(),
+            ChevronColor = ChevronColor is { } chevronColor ? ToSkColor(chevronColor) : null,
+            ChevronSize = ChevronSize is { } chevronSize ? (float)chevronSize : null
+        });
         if (ClearButtonShown)
         {
             var bounds = ClearButtonBounds(width, height);
@@ -886,6 +958,12 @@ internal sealed class SkUiPickerModel
         return null;
     }
 
+    /// <summary>The popup's search field: with <c>IsSearchEnabled</c>, for at least <c>SearchMinimumItemCount</c> items (and one); else <c>null</c>.</summary>
+    internal SkUiPickerSearch? CreateSearch() =>
+        IsSearchEnabled && _items.Count >= Math.Max(1, SearchMinimumItemCount)
+            ? new SkUiPickerSearch(SearchPlaceholder ?? SkUiStrings.Current.SearchPlaceholderText, SearchFilter)
+            : null;
+
     /// <summary>
     /// One opening of the popup: builds the drawn list and the request, hands them to the presenter, closes on the control's
     /// triggers, and reports the choice. It keeps the model only until the presenter's task finished.
@@ -965,7 +1043,7 @@ internal sealed class SkUiPickerModel
             // or the look's preferred width (window popups).
             var preferred = content.PreferredSize(
                 double.IsNaN(minimumWidth) ? Math.Min(placement == SkUiPopupPlacement.Anchored ? anchorBounds.Width : look.PopupPreferredWidth, maximumWidth) : minimumWidth,
-                maximumWidth);
+                maximumWidth, Math.Min(maximumHeight, windowSize.Height > 0 ? windowSize.Height : double.PositiveInfinity));
             var layout = SkUiPopupGeometry.Layout(new SkUiPopupPlacementInput(anchorBounds, rootBounds, windowSize,
                 safeArea, look.PopupMargin, look.PopupAnchorGap, placement, look.PopupHorizontalOptions,
                 look.PopupVerticalOptions, preferred, maximumHeight, model.PopupBounds, rightToLeft, minimumWidth, maximumWidth));
@@ -974,12 +1052,8 @@ internal sealed class SkUiPickerModel
                 new SkUiPopupRequestOptions(model.Title, look.GetPopupOverlayColor(layout.Placement), !SkUiMotion.IsMotionReduced, chrome));
             request.CornerRadius = look.GetPopupCornerRadius(layout.Placement);
             request.Shadow = look.GetPopupShadow(layout.Placement);
-            content.Surface.WidthRequest = layout.Bounds.Width;
-            content.Surface.HeightRequest = layout.Bounds.Height;
             // Rounded as the popup: the content's background and rows are clipped to the corners, whatever the presenter draws.
-            content.Surface.Clip = SkUiCornerRadii.HasAny(request.CornerRadius)
-                ? new RoundRectangleGeometry(request.CornerRadius, new Rect(0, 0, layout.Bounds.Width, layout.Bounds.Height))
-                : null;
+            SkUiPopupParts.Fit(content.Surface, layout.Bounds, request.CornerRadius);
             // A bottom pane reaches the window's edges: its content stays clear of the home indicator and a landscape notch.
             if (layout.Placement == SkUiPopupPlacement.BottomPane)
                 content.Surface.Padding = SkUiPopupGeometry.PaneContentPadding(safeArea);
@@ -989,7 +1063,7 @@ internal sealed class SkUiPickerModel
             _ = RunAsync(request);
         }
 
-        /// <summary>The default content: the items to choose one from (in a bottom pane, as a wheel when the look shows one).</summary>
+        /// <summary>The default content: the items to choose one from (in a bottom pane, as a wheel when the look shows one and there is no search).</summary>
         private ISkUiPickerPopupContent BuildList(in SkUiPickerPopupContext context)
         {
             var items = model._items.ToArray();
@@ -999,13 +1073,15 @@ internal sealed class SkUiPickerModel
                 _sourceItems = new object?[source.Count];
                 source.CopyTo(_sourceItems, 0);
             }
+            // A list the user can search stays a list.
+            var search = model.CreateSearch();
             // The wheel is named by the picker's title, as a native wheel column by its field (the title is otherwise only on the toolbar).
-            if (context.Placement == SkUiPopupPlacement.BottomPane && SkUiLook.Current.PickerPaneShowsWheel)
+            if (search is null && context.Placement == SkUiPopupPlacement.BottomPane && SkUiLook.Current.PickerPaneShowsWheel)
                 return new SkUiColumnsPopup([items], [false], [-1], [model.SelectedIndex], SkUiColumnsModel.DefaultVisibleRows, context.RowStyle, context.Title,
                     context.RightToLeft, context.Chrome, indices => model._owner.Choose(indices[0]), () => [model.SelectedIndex], [model._itemEnabled],
                     [new SkUiColumnsPopup.ColumnParts(null, model.ItemTemplate, model._owner.ItemsSource, Name: context.Title)], context.Extras, singleList: true);
             return new SkUiPickerPopup(items, model.SelectedIndex, model.ItemTemplate, model._owner.ItemsSource, context.RowStyle, context.Title, context.RightToLeft,
-                context.Chrome, itemEnabled: model._itemEnabled, extras: context.Extras, choose: model._owner.Choose);
+                context.Chrome, itemEnabled: model._itemEnabled, extras: context.Extras, choose: model._owner.Choose, search: search);
         }
 
         private async Task RunAsync(SkUiPopupRequest request)

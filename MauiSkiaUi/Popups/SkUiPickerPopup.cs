@@ -1,7 +1,14 @@
 using System.Collections;
+using System.Globalization;
 using SkiaSharp;
 
 namespace MauiSkiaUi;
+
+/// <summary>
+/// A picker popup's search field (the picker's <c>IsSearchEnabled</c>, shown for enough items): its placeholder and the app's
+/// filter (the item and the phrase; <c>null</c>: the item's text contains the phrase, ignoring case and accents).
+/// </summary>
+internal sealed record SkUiPickerSearch(string Placeholder, Func<object?, string, bool>? Filter);
 
 /// <summary>
 /// How a picker's popup rows draw their text without an item template (the picker's text properties), and what is behind the
@@ -33,17 +40,26 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
     /// <summary>Items whose texts are measured for the popup's width (more would cost too much on a long list).</summary>
     private const int MeasuredItems = 200;
 
+    /// <summary>Templated rows measured for the popup's size, at most (the rest are taken as tall as their average).</summary>
+    private const int MeasuredTemplatedRows = 50;
+
     private readonly SkUiCollectionView _list;
     private readonly SkUiLabel? _title;
     private readonly SkUiView? _footer;
     private readonly SkUiView? _appHeader;
     private readonly SkUiView? _appFooter;
     private readonly SelectAllRow? _selectAll;
+    private readonly SkUiSearchBar? _search;
+    private readonly SkUiLabel? _noResults;
+    private readonly SkUiGrid? _column;
+    private readonly Func<object?, string, bool>? _filter;
     private readonly SkUiPickerPopupChrome _chrome;
     private readonly IReadOnlyList<string> _texts;
     private readonly SkUiPickerRowStyle _style;
     private readonly DataTemplate? _template;
     private Row[] _rows;
+    private List<Row> _shown;
+    private string _phrase = string.Empty;
     private readonly bool _multiple;
     private readonly bool _closesOnToggle;
     private readonly Action<IReadOnlyList<int>>? _apply;
@@ -56,6 +72,12 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
     private SkUiTypeAhead _typeAhead;
     private bool _focusedOnce;
     private bool _applying;
+    private RowView? _probe;
+    // Where the popup opened (it fits into the room its presenter reports, and an anchored one with a search resizes against its
+    // anchor as the search filters), and whether the search field is under the rows.
+    private SkUiPopupLayout _opened;
+    private bool _filterResizes;
+    private bool _searchUnderRows;
 
     /// <summary>Check box (24) and its gap (12) in rows of a list with several choices.</summary>
     private const double CheckColumnWidth = 36;
@@ -65,11 +87,12 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
     /// makes it a list of several choices starting with <paramref name="checkedIndices"/>; <paramref name="selected"/> is for single lists.
     /// <paramref name="chrome"/>: whether the choice waits to be accepted, and the buttons. <paramref name="choose"/> applies a single
     /// list's choice while the popup stays open (<see cref="SkUiListPopupRequest.SetSelectedIndex"/> from a presenter of one's own).
+    /// <paramref name="search"/>: a search field above the rows that filters them as the user types.
     /// </summary>
     public SkUiPickerPopup(IReadOnlyList<string> texts, int selected, DataTemplate? template, IList? itemsSource, SkUiPickerRowStyle style, string? title,
         bool rightToLeft, SkUiPickerPopupChrome chrome, Action<IReadOnlyList<int>>? apply = null, Func<IReadOnlyList<int>>? currentSelection = null,
         IReadOnlyList<int>? checkedIndices = null, bool closesOnToggle = false, IReadOnlyList<bool>? itemEnabled = null, SkUiPopupExtras extras = default,
-        string? selectAllText = null, Action<int>? choose = null)
+        string? selectAllText = null, Action<int>? choose = null, SkUiPickerSearch? search = null)
     {
         _choose = choose;
         _closesOnToggle = closesOnToggle;
@@ -93,14 +116,25 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
         for (var index = 0; index < _rows.Length; index++)
             _rows[index] = new Row(index, texts[index], itemsSource is not null && index < itemsSource.Count ? itemsSource[index] : texts[index])
             {
-                IsEnabled = SkUiItemStates.IsEnabled(itemEnabled, index)
+                IsEnabled = SkUiItemStates.IsEnabled(itemEnabled, index),
+                Position = index
             };
+        _shown = [.. _rows];
         _list = new SkUiCollectionView
         {
             SelectionBackground = style.SelectionBackground ?? new SolidColorBrush(look.PopupHighlightColor),
             ItemTemplate = new DataTemplate(() => new RowView(template, style, _multiple)),
-            ItemsSource = _rows
+            ItemsSource = _shown
         };
+        if (search is not null)
+        {
+            _filter = search.Filter;
+            _search = CreateSearchField(search.Placeholder, style);
+            _search.TextChanged += OnSearchTextChanged;
+            _search.SearchButtonPressed += OnSearchButtonPressed;
+            _search.KeyPreview = OnSearchKeyDown;
+            _list.EmptyView = _noResults = NoResults(style);
+        }
         if (_multiple)
         {
             _list.SelectionMode = SkUiSelectionMode.Multiple;
@@ -133,10 +167,16 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             _selectAll = new SelectAllRow(this, selectAllText, style);
             _selectAll.Show(SelectAllState());
         }
-        var header = _appHeader is not null && _selectAll is not null
-            ? new SkUiVerticalStackLayout { Children = { _appHeader, _selectAll } }
-            : _appHeader ?? _selectAll;
-        Content = SkUiPopupParts.Compose(_title, header, _list, _appFooter, _footer, chrome.IsToolbar);
+        if (_title is null && _appHeader is null && _search is null && _selectAll is null && _appFooter is null && _footer is null)
+        {
+            Content = _list;
+        }
+        else
+        {
+            _column = new SkUiGrid();
+            LayOutParts(searchUnderRows: false);
+            Content = _column;
+        }
         var first = _multiple ? (_initialChecked.Length > 0 ? _initialChecked[0] : -1) : _highlighted;
         if (first >= 0 && first < _rows.Length)
             _ = _list.ScrollToIndex(first, ScrollToPosition.Center, animated: false);
@@ -170,6 +210,18 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
                 RequiresAccept = chrome.RequiresAccept, AcceptText = chrome.AcceptText, CancelText = chrome.CancelText
             };
         Request = request;
+        _opened = layout;
+        request.AvailableAreaChanged = FitBounds;
+        // An anchored popup with a search resizes as it filters, against its anchor: opened above, the search field goes under the
+        // rows, next to the anchor, where it stays as the popup's top edge moves.
+        if (layout.Placement == SkUiPopupPlacement.Anchored && _search is not null)
+        {
+            _filterResizes = true;
+            if (layout.OpensAbove)
+                LayOutParts(_searchUnderRows = true);
+        }
+        // Resized, the drawn content stays where the popup's edge does until it is laid out to the new size.
+        SurfaceKeepsBottom = layout.OpensAbove || layout.Placement == SkUiPopupPlacement.BottomPane;
         // Handed to the request, which lets go of it when it completes: a presenter may keep this content, and it must not keep the picker.
         _choose = null;
         return request;
@@ -182,10 +234,12 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
     internal int HighlightedIndex => _highlighted;
 
     /// <summary>
-    /// The size the content wants: as wide as its widest text (the first items') or templated row (the first one's), at least
+    /// The size the content wants: as wide as its widest text (the first items') or templated row, at least
     /// <paramref name="minimumWidth"/>, at most <paramref name="maximumWidth"/>, and as tall as all its rows and its title.
+    /// Templated rows are measured one by one (at the popup's width) until they are taller than <paramref name="maximumHeight"/>
+    /// (past it the list scrolls) or <see cref="MeasuredTemplatedRows"/> were; the rest count as tall as their average.
     /// </summary>
-    public Size PreferredSize(double minimumWidth, double maximumWidth)
+    public Size PreferredSize(double minimumWidth, double maximumWidth, double maximumHeight)
     {
         var look = SkUiLook.Current;
         var padding = look.PopupItemPadding;
@@ -205,23 +259,105 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             layout.Release();
         }
         var width = Math.Ceiling(widest + padding.HorizontalThickness + (_multiple ? CheckColumnWidth : 0));
-        double rowHeight = look.PopupItemHeight;
-        RowView? probe = null;
+        double rowsHeight;
         if (_template is not null && _rows.Length > 0)
         {
-            // Templated rows: at least as wide as the first one wants (its own padding included) and as tall as it at the
-            // popup's width, for every row (the list measures each row once it shows).
-            probe = new RowView(_template, _style, _multiple) { BindingContext = _rows[0] };
-            width = Math.Max(width, Math.Ceiling(probe.Measure(maximumWidth, double.PositiveInfinity).Width));
-        }
-        width = Math.Clamp(width, Math.Min(minimumWidth, maximumWidth), maximumWidth);
-        if (probe is not null)
-        {
-            rowHeight = probe.Measure(width, double.PositiveInfinity).Height;
+            // Templated rows: each as tall as it is (a wrapped line, an optional one). At least as wide as the widest of the measured
+            // rows wants (its own padding included), then as tall as they are at the popup's width (narrower rows wrap more).
+            var probe = Probe();
+            var rows = Math.Min(_rows.Length, MeasuredTemplatedRows);
+            var tall = 0d;
+            var count = 0;
+            for (; count < rows && tall <= maximumHeight; count++)
+            {
+                probe.BindingContext = _rows[count];
+                var size = probe.Measure(maximumWidth, double.PositiveInfinity);
+                width = Math.Max(width, Math.Ceiling(size.Width));
+                tall += size.Height;
+            }
             probe.BindingContext = null;
+            width = Math.Clamp(width, Math.Min(minimumWidth, maximumWidth), maximumWidth);
+            rowsHeight = RowsHeight(_rows, width, maximumHeight, count);
         }
-        var height = _rows.Length * rowHeight + SkUiPopupParts.ExtraHeight(width, _title, _appHeader, _selectAll, _appFooter, _footer);
-        return new Size(width, height);
+        else
+        {
+            width = Math.Clamp(width, Math.Min(minimumWidth, maximumWidth), maximumWidth);
+            rowsHeight = RowsHeight(_rows, width, maximumHeight);
+        }
+        // As tall as every row: an anchored popup shrinks to the rows a search shows (FitBounds) when its presenter follows it.
+        return new Size(width, rowsHeight + PartsHeight(width));
+    }
+
+    /// <summary>
+    /// How tall <paramref name="rows"/> are at <paramref name="width"/>: plain rows the look's height each; templated ones measured
+    /// one by one until they are taller than <paramref name="maximumHeight"/> or <paramref name="limit"/> were, the rest as tall as
+    /// their average.
+    /// </summary>
+    private double RowsHeight(IReadOnlyList<Row> rows, double width, double maximumHeight, int limit = MeasuredTemplatedRows)
+    {
+        if (_template is null)
+            return rows.Count * SkUiLook.Current.PopupItemHeight;
+        if (rows.Count == 0)
+            return 0;
+        var probe = Probe();
+        var tall = 0d;
+        var measured = 0;
+        for (var last = Math.Min(rows.Count, limit); measured < last && tall <= maximumHeight; measured++)
+        {
+            probe.BindingContext = rows[measured];
+            tall += probe.Measure(width, double.PositiveInfinity).Height;
+        }
+        probe.BindingContext = null;
+        return tall + (rows.Count - measured) * (tall / measured);
+    }
+
+    /// <summary>The row that measures templated rows (bound to each in turn).</summary>
+    private RowView Probe() => _probe ??= new RowView(_template, _style, _multiple);
+
+    /// <summary>The height of everything but the rows at <paramref name="width"/>: the title, header, search field, footer and buttons.</summary>
+    private double PartsHeight(double width) => SkUiPopupParts.ExtraHeight(width, _title, _appHeader, _search, _selectAll, _appFooter, _footer);
+
+    /// <summary>
+    /// The parts in a column: a bottom pane's toolbar, the title, the app's header, the search field, then "Select all" (it chooses
+    /// the rows the search shows), the rows, the app's footer and the buttons. <paramref name="searchUnderRows"/> (opened above the
+    /// anchor): the search field goes right under the rows.
+    /// </summary>
+    private void LayOutParts(bool searchUnderRows)
+    {
+        var toolbar = _chrome.IsToolbar;
+        SkUiPopupParts.Column(_column!, _list, toolbar ? _footer : null, _title, _appHeader, searchUnderRows ? null : _search, _selectAll, _list,
+            searchUnderRows ? _search : null, _appFooter, toolbar ? null : _footer);
+    }
+
+    /// <summary>
+    /// A popup whose presenter follows its bounds (<see cref="SkUiPopupRequest.BoundsChanged"/>) fits into the room the presenter
+    /// reports (<see cref="SkUiPopupRequest.AvailableArea"/>: the window less the soft keyboard) with
+    /// <see cref="SkUiPopupGeometry.Fitted"/>; an anchored one with a search is also as tall as the rows it shows (the "No results"
+    /// text for none) and the other parts, never taller than it opened, against its anchor. Resizing against its bottom edge (above
+    /// the anchor, on the room's bottom), the search field is under the rows, where it stays.
+    /// </summary>
+    private void FitBounds()
+    {
+        if (Request is not { FollowsBounds: true } request)
+            return;
+        var width = _opened.Bounds.Width;
+        var parts = PartsHeight(width);
+        var height = _opened.Bounds.Height;
+        if (_filterResizes)
+            height = parts + (_shown.Count > 0 ? RowsHeight(_shown, width, height) : _noResults!.Measure(width, double.PositiveInfinity).Height);
+        var available = request.AvailableArea;
+        var bounds = SkUiPopupGeometry.Fitted(_opened, height, available, parts + SkUiLook.Current.PopupItemHeight, out var bottomStays);
+        if (_search is not null && _opened.Placement == SkUiPopupPlacement.Anchored && bottomStays != _searchUnderRows)
+            LayOutParts(_searchUnderRows = bottomStays);
+        // A bottom pane over the soft keyboard: no room kept for the home indicator the keyboard covers.
+        if (_opened.Placement == SkUiPopupPlacement.BottomPane)
+            Padding = SkUiPopupGeometry.PaneContentPadding(_opened.SafeAreaInsets, _opened.WindowSize, available);
+        // Committed with the next frame, after a resize: set while the popup stays put, so it is in place for the next resize.
+        SurfaceKeepsBottom = bottomStays || _opened.Placement == SkUiPopupPlacement.BottomPane;
+        if (bounds == request.Bounds)
+            return;
+        SkUiPopupParts.Fit(this, bounds, request.CornerRadius);
+        request.MoveTo(bounds);
     }
 
     /// <summary>A tap would select or toggle a disabled row: the list keeps its selection.</summary>
@@ -243,14 +379,14 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
 
     private void OnItemTapped(object? sender, SkUiItemTappedEventArgs args)
     {
-        if (args.Index < 0 || args.Index >= _rows.Length || !_rows[args.Index].IsEnabled)
+        if (args.Item is not Row { IsEnabled: true } row)
             return;
         if (_multiple)
-            _highlighted = args.Index; // the list toggled the row; the keyboard goes on from it
+            _highlighted = row.Index; // the list toggled the row; the keyboard goes on from it
         else if (_chrome.RequiresAccept)
-            Highlight(args.Index); // the list selected it; OK (or Enter) chooses it
+            Highlight(row.Index); // the list selected it; OK (or Enter) chooses it
         else
-            Choose(args.Index);
+            Choose(row.Index);
     }
 
     /// <summary>The list changed its chosen rows (a tap, or <see cref="ToggleRow"/>): the picker takes them at once.</summary>
@@ -260,16 +396,16 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             ApplyListSelection();
     }
 
-    /// <summary>The list's chosen rows go to the request (applied at once, or the draft).</summary>
+    /// <summary>The list's chosen rows, and the checked rows the search hides, go to the request (applied at once, or the draft).</summary>
     private void ApplyListSelection()
     {
         if (Request is not SkUiSelectionPopupRequest request)
             return;
+        var listed = _list.SelectedItems.OfType<Row>().ToHashSet();
         var chosen = new List<int>();
-        foreach (var item in _list.SelectedItems)
-            if (item is Row row)
+        foreach (var row in _rows)
+            if (row.Position < 0 ? row.IsChecked : listed.Contains(row))
                 chosen.Add(row.Index);
-        chosen.Sort();
         ShowChecks(chosen);
         _applying = true;
         try
@@ -285,12 +421,12 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             request.Close();
     }
 
-    /// <summary>"Select all": checked when every row that can be chosen is, unchecked when none is, else in between.</summary>
+    /// <summary>"Select all": checked when every shown row that can be chosen is, unchecked when none is, else in between.</summary>
     private SkUiCheckState SelectAllState()
     {
         var enabled = 0;
         var checkedRows = 0;
-        foreach (var row in _rows)
+        foreach (var row in _shown)
         {
             if (!row.IsEnabled)
                 continue;
@@ -301,7 +437,10 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
         return checkedRows == 0 ? SkUiCheckState.Unchecked : checkedRows == enabled ? SkUiCheckState.Checked : SkUiCheckState.Indeterminate;
     }
 
-    /// <summary>"Select all" tapped: every row that can be chosen is chosen, or (all were) none is; one change of the selection.</summary>
+    /// <summary>
+    /// "Select all" tapped: every shown row (those the search found) that can be chosen is chosen, or (all were) none is; one
+    /// change of the selection.
+    /// </summary>
     private void ToggleAll()
     {
         if (Request is not { } request || request.CloseRequested.IsCancellationRequested)
@@ -310,7 +449,7 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
         _applying = true;
         try
         {
-            foreach (var row in _rows)
+            foreach (var row in _shown)
             {
                 if (!row.IsEnabled || row.IsChecked == choose)
                     continue;
@@ -342,9 +481,8 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
 
     private void ToggleRow(int index)
     {
-        if (index < 0 || index >= _rows.Length || !_rows[index].IsEnabled)
+        if (index < 0 || index >= _rows.Length || _rows[index] is not { IsEnabled: true, Position: >= 0 } row)
             return;
-        var row = _rows[index];
         if (!_list.SelectedItems.Remove(row))
             _list.SelectedItems.Add(row);
     }
@@ -361,7 +499,11 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
     {
         if (Request is not { } request || request.CloseRequested.IsCancellationRequested)
             return false;
-        var count = _rows.Length;
+        // The keys move through the rows the list shows (the search's matches); the highlight stays an item's index.
+        var count = _shown.Count;
+        var at = HighlightedPosition;
+        // Without a search the rows are the items, and their states the picker's.
+        var states = _phrase.Length == 0 ? _itemEnabled : _shown.Select(static row => row.IsEnabled).ToArray();
         switch (key.Key)
         {
             case SkUiKey.Escape:
@@ -372,32 +514,38 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
                 return true;
             case SkUiKey.Space when _multiple && !key.IsRepeat:
                 // Without a cursor yet, Space puts it on the first row that can be chosen (Space again toggles it).
-                if (_highlighted < 0)
+                if (at < 0)
                 {
-                    if (SkUiItemStates.Nearest(_itemEnabled, count, 0, 1) is var firstEnabled and >= 0)
-                        Highlight(firstEnabled);
+                    if (SkUiItemStates.Nearest(states, count, 0, 1) is var firstEnabled and >= 0)
+                        Highlight(_shown[firstEnabled].Index);
                     return count > 0;
                 }
                 ToggleRow(_highlighted);
                 return true;
             case SkUiKey.Enter or SkUiKey.Space when !key.IsRepeat:
-                if (_highlighted >= 0)
+                if (at >= 0)
                     Choose(_highlighted);
                 else
                     request.Close();
                 return true;
             case SkUiKey.Tab:
                 return true; // focus stays in the popup
+            case SkUiKey.Character when _search is not null && !key.HasCommandModifier:
+                // Typing searches: the search field takes the character and the keys that follow.
+                _search.Text = _search.Text + key.Character;
+                _search.CursorPosition = _search.Text.Length;
+                _search.Focus();
+                return true;
         }
         if (count == 0 || key.HasCommandModifier)
             return false;
         var page = Math.Max(1, (int)(_list.Height / SkUiLook.Current.PopupItemHeight) - 1);
         var target = key.Key switch
         {
-            SkUiKey.Down => _highlighted + 1,
-            SkUiKey.Up => _highlighted < 0 ? 0 : _highlighted - 1,
-            SkUiKey.PageDown => _highlighted + page,
-            SkUiKey.PageUp => _highlighted - page,
+            SkUiKey.Down => at + 1,
+            SkUiKey.Up => at < 0 ? 0 : at - 1,
+            SkUiKey.PageDown => at + page,
+            SkUiKey.PageUp => at - page,
             SkUiKey.Home => 0,
             SkUiKey.End => count - 1,
             SkUiKey.Character => SkUiTypeAhead.Next(_texts, _highlighted, key.Character, ref _typeAhead, _itemEnabled),
@@ -407,10 +555,89 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             return false;
         // Disabled rows are passed by in the key's direction.
         var step = key.Key is SkUiKey.Up or SkUiKey.PageUp or SkUiKey.End ? -1 : 1;
-        if (SkUiItemStates.Nearest(_itemEnabled, count, target, step) is var enabled and >= 0)
-            Highlight(enabled);
+        if (SkUiItemStates.Nearest(states, count, target, step) is var enabled and >= 0)
+            Highlight(_shown[enabled].Index);
         return true;
     }
+
+    /// <summary>Where the highlighted row is in the list; -1 without one, or while the search hides it.</summary>
+    private int HighlightedPosition => _highlighted >= 0 && _highlighted < _rows.Length ? _rows[_highlighted].Position : -1;
+
+    /// <summary>
+    /// A key in the search field: Up / Down and Page Up / Page Down move the list's highlight (the field keeps the focus), and
+    /// with several choices Enter accepts; other keys edit the phrase.
+    /// </summary>
+    private bool OnSearchKeyDown(in SkUiKeyEvent key) =>
+        (key.Key is SkUiKey.Up or SkUiKey.Down or SkUiKey.PageUp or SkUiKey.PageDown || key.Key == SkUiKey.Enter && _multiple) && OnKeyDown(key);
+
+    /// <summary>The search field's Enter (the keyboard's search key): one choice takes the highlighted row, else the first match.</summary>
+    private void OnSearchButtonPressed(object? sender, EventArgs args)
+    {
+        if (_multiple || Request is not { } request || request.CloseRequested.IsCancellationRequested)
+            return;
+        if (HighlightedPosition >= 0)
+            Choose(_highlighted);
+        else if (_phrase.Length > 0 && _shown.FirstOrDefault(static row => row.IsEnabled) is { } first)
+            Choose(first.Index);
+    }
+
+    private void OnSearchTextChanged(object? sender, TextChangedEventArgs args) => Filter(args.NewTextValue);
+
+    /// <summary>
+    /// Shows the rows that match <paramref name="phrase"/> (all of them for an empty one), in the items' order. The list's selection
+    /// follows: the highlight while it shows, the checked rows that show (hidden ones stay checked).
+    /// </summary>
+    internal void Filter(string? phrase)
+    {
+        phrase = phrase?.Trim() ?? string.Empty;
+        if (phrase == _phrase)
+            return;
+        _phrase = phrase;
+        var shown = new List<Row>(phrase.Length == 0 ? _rows.Length : 16);
+        foreach (var row in _rows)
+        {
+            var matches = phrase.Length == 0 || (_filter is { } filter ? filter(row.Item, phrase) : Contains(row.Text, phrase));
+            row.Position = matches ? shown.Count : -1;
+            if (matches)
+                shown.Add(row);
+        }
+        _shown = shown;
+        _applying = true;
+        try
+        {
+            // A new source drops the selected rows it lacks; the checked rows that show again are selected again.
+            _list.ItemsSource = shown;
+            if (_multiple)
+            {
+                var listed = _list.SelectedItems.OfType<Row>().ToHashSet();
+                foreach (var row in shown)
+                    if (row.IsChecked && !listed.Contains(row))
+                        _list.SelectedItems.Add(row);
+            }
+            else
+            {
+                _list.SelectedItem = HighlightedPosition >= 0 ? _rows[_highlighted] : null;
+            }
+        }
+        finally
+        {
+            _applying = false;
+        }
+        _selectAll?.Show(SelectAllState());
+        FitBounds();
+        if (shown.Count > 0)
+            _ = _list.ScrollToIndex(Math.Max(0, HighlightedPosition), ScrollToPosition.MakeVisible, animated: false);
+    }
+
+    /// <summary>The default match: <paramref name="text"/> contains <paramref name="phrase"/>, ignoring case and accents ("zurich" finds "Zürich").</summary>
+    internal static bool Contains(string text, string phrase) =>
+        CultureInfo.CurrentCulture.CompareInfo.IndexOf(text, phrase, CompareOptions.IgnoreCase | CompareOptions.IgnoreNonSpace) >= 0;
+
+    /// <summary>The search field (tests).</summary>
+    internal SkUiSearchBar? SearchBar => _search;
+
+    /// <summary>The rows the list shows, as the items' indices (tests).</summary>
+    internal IEnumerable<int> ShownIndices => _shown.Select(static row => row.Index);
 
     /// <summary>The Clear button: no row chosen (several choices: through the list, so the request follows), no highlight.</summary>
     internal void ClearChoice()
@@ -419,9 +646,16 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             return;
         if (_multiple)
         {
-            // Disabled rows the app chose stay chosen.
-            foreach (var row in _list.SelectedItems.OfType<Row>().Where(row => row.IsEnabled).ToList())
+            // Disabled rows the app chose stay chosen. Rows the search hides are unchecked first, so they go with the first change.
+            var hidden = false;
+            foreach (var row in _rows)
+                if (row is { Position: < 0, IsChecked: true, IsEnabled: true })
+                    (row.IsChecked, hidden) = (false, true);
+            var shown = _list.SelectedItems.OfType<Row>().Where(row => row.IsEnabled).ToList();
+            foreach (var row in shown)
                 _list.SelectedItems.Remove(row);
+            if (hidden && shown.Count == 0)
+                ApplyListSelection();
             return;
         }
         _highlighted = -1;
@@ -445,11 +679,14 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
         if (index == _highlighted)
             return;
         _highlighted = index;
+        // A row the search hides is highlighted once it shows again.
+        var position = _rows[index].Position;
         if (_multiple)
             ShowCursor(index);
         else
-            _list.SelectedItem = _rows[index];
-        _ = _list.ScrollToIndex(index, ScrollToPosition.MakeVisible, animated: false);
+            _list.SelectedItem = position >= 0 ? _rows[index] : null;
+        if (position >= 0)
+            _ = _list.ScrollToIndex(position, ScrollToPosition.MakeVisible, animated: false);
     }
 
     /// <summary>
@@ -503,7 +740,7 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
             ShowChecks(chosen);
             _list.SelectedItems.Clear();
             foreach (var index in chosen)
-                if (index >= 0 && index < _rows.Length)
+                if (index >= 0 && index < _rows.Length && _rows[index].Position >= 0)
                     _list.SelectedItems.Add(_rows[index]);
             (Request as SkUiSelectionPopupRequest)?.Refresh(chosen);
         }
@@ -547,7 +784,40 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
         _list.SelectionChanging -= OnListSelectionChanging;
         _list.ItemsSource = null;
         _rows = [];
+        _shown = [];
+        if (_search is null)
+            return;
+        _search.TextChanged -= OnSearchTextChanged;
+        _search.SearchButtonPressed -= OnSearchButtonPressed;
+        _search.KeyPreview = null;
     }
+
+    /// <summary>The search field above the rows (under them when the popup opened above its anchor): a search bar in the picker's font, inset as the rows' text.</summary>
+    private static SkUiSearchBar CreateSearchField(string placeholder, in SkUiPickerRowStyle style)
+    {
+        var padding = SkUiLook.Current.PopupItemPadding;
+        return new SkUiSearchBar
+        {
+            Placeholder = placeholder,
+            FontFamily = style.FontFamily,
+            FontSize = style.FontSize,
+            FontAutoScalingEnabled = style.FontAutoScalingEnabled,
+            TextColor = style.TextColor ?? SkUiColors.DefaultForeground,
+            Margin = new Thickness(padding.Left, 8, padding.Right, 4)
+        };
+    }
+
+    /// <summary>What the list shows when nothing matches the search.</summary>
+    private static SkUiLabel NoResults(in SkUiPickerRowStyle style) => new()
+    {
+        Text = SkUiStrings.Current.NoResultsText,
+        FontFamily = style.FontFamily,
+        FontSize = style.FontSize,
+        FontAutoScalingEnabled = style.FontAutoScalingEnabled,
+        TextColor = SkUiColors.Muted,
+        Padding = SkUiLook.Current.PopupItemPadding,
+        HorizontalTextAlignment = TextAlignment.Center
+    };
 
     /// <summary>
     /// The "Select all" row of a list with several choices: a check box (checked, unchecked, or in between when some rows are chosen)
@@ -642,6 +912,9 @@ internal sealed class SkUiPickerPopup : SkUiContentView, ISkUiKeyHandler, ISkUiP
         public int Index { get; } = index;
         public string Text { get; } = text ?? string.Empty;
         public object? Item { get; } = item;
+
+        /// <summary>Where the list shows the row: its index, or with a search its place among the matches; -1 while the search hides it.</summary>
+        public int Position { get; set; }
 
         /// <summary>Raised when <see cref="IsChecked"/> or <see cref="IsCursor"/> changed (the row's view shows it).</summary>
         public event EventHandler? StateChanged;
