@@ -9,12 +9,13 @@ Versions are ``X.Y.Z`` (stable) or ``X.Y.Z-PrereleaseNN`` (two-digit NN). Bumps:
   auto        devel: prerelease, or minor from a stable version; master: patch (release from a prerelease)
   prerelease  X.Y.Z-PrereleaseNN -> X.Y.Z-Prerelease(NN+1)
   release     X.Y.Z-PrereleaseNN -> X.Y.Z; on devel at a stable X.Y.Z, the next minor X.(Y+1).0 (no prerelease)
-  patch/minor/major               -> next X.Y.Z; on devel, its -Prerelease01
+  patch       X.Y.Z -> X.Y.(Z+1), also on devel (a bugfix release; refused there in a prerelease line)
+  minor/major -> next X.(Y+1).0 / (X+1).0.0; on devel, its -Prerelease01 (a prerelease line)
   none        publish the current version again (e.g. retry a failed publish)
 
-Branch rules: devel publishes prereleases, and stable versions with ``release`` only (the publish workflow then moves
-master to that release); master publishes stable versions only (hotfixes), except while no stable version exists yet
-(current version still a prerelease), when prereleases come from master too.
+Branch rules: devel publishes prereleases, and stable versions with ``release`` or ``patch`` only (the publish workflow
+then moves master to that release); master publishes stable versions only (hotfixes), except while no stable version
+exists yet (current version still a prerelease), when prereleases come from master too.
 ``apply`` renames CHANGELOG.md's ``## Unreleased`` section to the version (refusing one without entries) and opens a new
 empty ``## Unreleased`` above it.
 """
@@ -70,7 +71,7 @@ def next_version(current: str, bump: str, branch: str) -> str:
         new = current
     elif bump == "prerelease":
         if pre is None:
-            fail(f"{current} is stable: start a prerelease line with patch / minor / major (on devel)")
+            fail(f"{current} is stable: start a prerelease line with minor / major (on devel)")
         new = fmt(major, minor, patch, pre + 1)
     elif bump == "release":
         if pre is None:
@@ -79,19 +80,23 @@ def next_version(current: str, bump: str, branch: str) -> str:
             minor, patch = minor + 1, 0  # devel at a stable version: straight to the next minor, no prerelease line
         new = fmt(major, minor, patch, None)
     elif bump in ("patch", "minor", "major"):
+        if bump == "patch" and branch == "devel" and pre is not None:
+            # A bugfix release of devel would ship the unreleased prerelease line with it.
+            fail(f"{current} is in a prerelease line: end it with release, or publish the fix from master (hotfix)")
         if bump == "major":
             major, minor, patch = major + 1, 0, 0
         elif bump == "minor":
             minor, patch = minor + 1, 0
         else:
             patch += 1
-        new = fmt(major, minor, patch, 1 if branch == "devel" else None)
+        # On devel, patch is a bugfix release (stable); minor / major start a prerelease line.
+        new = fmt(major, minor, patch, 1 if branch == "devel" and bump != "patch" else None)
     else:
         fail(f"unknown bump {bump!r}")
 
     new_pre = parse(new)[3]
-    if branch == "devel" and new_pre is None and bump not in ("release", "none"):
-        fail(f"devel publishes stable versions with bump release only ({new} is stable)")
+    if branch == "devel" and new_pre is None and bump not in ("release", "patch", "none"):
+        fail(f"devel publishes stable versions with bump release or patch only ({new} is stable)")
     if branch == "master" and new_pre is not None and pre is None:
         fail(f"master publishes stable versions only ({new} is a prerelease); publish prereleases from devel")
     return new

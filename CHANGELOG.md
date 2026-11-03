@@ -22,6 +22,10 @@ Publishing (the NuGet publish workflow, [docs/Releasing.md](docs/Releasing.md)) 
 
 - **Android: check boxes, radio buttons, switches and selected chips no longer crash accessibility with `Xamarin.AndroidX.Core` 1.19:** an app that resolves 1.19 (through Google Play Services, `Xamarin.AndroidX.CustomView` 1.2.0.4 and others) threw `MissingMethodException: AccessibilityNodeInfoCompat.set_Checked(bool)` as soon as TalkBack or a UI-test driver (UiAutomator, Maestro) read a drawn view with a check state, since that binding turned `Checked` into the tri-state `int`. The checked state is now set on the platform node, which works with every AndroidX version; on Android 16+ all three states go through `CheckedState` (a mixed check box is partially checked, as before). CI also builds the Android TFM against the newest `Xamarin.AndroidX.Core`, so a binding change like this one fails the build (issue #78).
 
+### Other
+
+- **Bugfix releases from `devel`:** the publish workflow's bump `patch` on `devel` now makes a stable release (`1.5.0` → `1.5.1`) and moves `master` to it, as bump `release` does; before, it started a `1.5.1-Prerelease01` line. Prerelease lines start with `minor` or `major` (`auto` still starts one with `minor`). A `patch` from `devel` in a prerelease line is refused: the fix goes to `master` as a hotfix ([docs/Releasing.md](docs/Releasing.md)).
+
 ## 1.5.0
 
 ### New features
