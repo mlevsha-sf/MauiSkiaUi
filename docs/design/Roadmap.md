@@ -56,6 +56,15 @@ Steps, order and open decisions: [ImplementationPlan-1.4.md](ImplementationPlan-
 
 Taken up when a real app needs it, roughly in this order within each area. Items name the control or mechanism; their designs are in the linked docs.
 
+### .NET 11 / MAUI 11 support
+
+Multi-target the one `SkiaUi.Maui` package (`net10.0-*` plus `net11.0-*`) so apps that stay on .NET 10 keep restoring the net10 assets and never see MAUI 11; no net10 TFM is dropped. Not started; ships as an additive minor release, as a prerelease until MAUI 11 is GA.
+
+- Per-TFM `MauiVersion` (and SkiaSharp / Community Toolkit versions where the net11 builds need others) in [Directory.Build.props](../../Directory.Build.props); `SKUI_NET11` define for the few MAUI 11 API differences, behind small shims rather than `#if`s in controls; per-TFM `SupportedOSPlatformVersion`.
+- .NET 11 SDK for the net11 TFMs (`global.json` or a separate CI job); keep trim / AOT warnings at 0 on both TFM sets.
+- CI: build matrix over both TFM sets, headless tests on `net10.0` and `net11.0`, a public API comparison between them, and a net10 consumer app restoring the packed nupkg.
+- Update CLAUDE.md, Development.md, Migration.md and the "stays on MAUI 10.x" note above when it starts.
+
 ### New controls and packages
 
 - **Calendar** (`SkUiCalendar` + `SkUiCoreCalendar`, [FR-33](Requirements.md#functional-requirements)): one drawn node per month, render-thread swiping on the carousel's engine, year / decade / century views, single, multiple and range selection, per-day styles; then a calendar popup for the date pickers and a date range picker. Steps F1–F7 in the [archived plan](../archive/ImplementationPlan-1.0.md#phase-f--calendar-skuicalendar).
@@ -100,13 +109,15 @@ Taken up when a real app needs it, roughly in this order within each area. Items
 
 ### Architecture and performance
 
-- A separate Core assembly without `Microsoft.Maui.Controls`.
-- Child alignment in every Core container; scheme defaults resolved at paint time instead of snapshotted when a control is created.
-- Measure invalidation without re-recording ancestors for Core nodes (done for SkUi\* views).
-- Relayout boundaries; raster cache of stable subtrees with a per-frame budget.
-- Recording Core-only subtrees off the UI thread; hit-testing against render-thread transforms while animations run.
-- Overlay masks, so drawn popups can cover hosted native controls; cheaper overlay bookkeeping on Android.
-- Core buttons' first frame on the Galaxy S9 is about 25 % slower since gradient backgrounds landed (`core-buttons` `firstFrame` 110 → 140 ms, Release).
+- Measure invalidation without re-recording ancestors for Core nodes (done for SkUi\* views): `SkUiCoreNode.InvalidateMeasure` marks each Core ancestor's content dirty, so one label's new text re-records every container up to the host.
+- Scheme defaults resolved at paint time on the Core layer: Core controls copy `SkUiColors.Accent`, `TrackOff`, `Muted` and so on into fields when they are created, so a Core tree made before `SkUiColorScheme.Current` changes (dark mode) keeps the old colors.
+- Shaped borders' first frame: 400 ticket-shaped cards take 1–2 s to their first frame on the iPhone 8 and the Galaxy S9, because each card computes its outline and its content clip (a path operation) when it is first laid out; borders of one shape and size could share them ([Performance.md](../Performance.md#drawing-effects)).
+- Text shadows on mid-range Android: they are cast from the glyphs and rasterized on the CPU once per item, which holds a scrolling list on the S9 at 45 fps; cast them on the GPU as outline shadows are.
+- Relayout boundaries below the surface root (the root is one); raster cache of stable subtrees with a per-frame budget, for what is expensive to composite every frame (dashed strokes of complex paths: 33 fps on the S9).
+- Core's first frame is no faster than SkUi\*'s on devices (1,000 buttons: S9 169 vs 167 ms, iPhone 8 35 vs 37 ms) although Core builds its tree three times faster; `scripts/bench.sh` `core-buttons` `firstFrame` on the S9 went from 110 to 140 ms (Release) with gradient backgrounds (MAUI parity P7). The device results in [Performance.md](../Performance.md) are from MAUI 10.0.110 and SkiaSharp 4.153.1 (21 October 2026): measure them again on the current toolchain first.
+- Recording Core-only subtrees off the UI thread (the look, the color scheme and the text and image caches would have to be safe to read from it); hit-testing against render-thread transforms while animations run.
+- Overlay masks, so drawn popups can cover hosted native controls (mostly WebView, media and maps now that text fields are drawn); cheaper overlay bookkeeping on Android.
+- A test that keeps the Core layer to [FR-C1](Requirements.md#core-layer-fr-c): no Core node derives from `BindableObject` or `Element`, and the `Microsoft.Maui.Controls` types the Core API uses (`FontAttributes`, `DataTemplate` for picker popups, the host's `SkUiView`) are a list a new one has to join.
 
 ## Verification backlog
 
@@ -132,4 +143,4 @@ Breaking changes for MAUI parity, kept out of 1.x so the 1.0 API stays as it is.
 
 ## Not planned
 
-By design: drawn WebView, media and maps (host them in `SkUiMauiContentView`); Shell, navigation, pages and popup windows of SkiaUi's own (drawn controls open popups through the app's popup system); controls MAUI made obsolete (Frame, ListView, TableView, cells, compatibility layouts); context flyouts and drag and drop; `ImageBrush` (internal in MAUI 10, so no MAUI page can use one: an `SkUiImage` behind the content does it); clones of other vendors' controls; `{TemplateBinding}` and `RelativeSource TemplatedParent` in drawn templates (MAUI resolves them through an internal interface; the migration checker rewrites them to `RelativeSource AncestorType`); reading platform-specific attached properties at runtime (the checker converts the ones with a SkiaUi member, and their other drawn meanings are SkiaUi members in the backlog); `SafeAreaEdges` on drawn views inside a surface (only the surface root applies it, so layout does not depend on where a view is in the window); a Core flex layout (Core uses the wrap and shrink layouts and the grid).
+By design: drawn WebView, media and maps (host them in `SkUiMauiContentView`); Shell, navigation, pages and popup windows of SkiaUi's own (drawn controls open popups through the app's popup system); controls MAUI made obsolete (Frame, ListView, TableView, cells, compatibility layouts); context flyouts and drag and drop; `ImageBrush` (internal in MAUI 10, so no MAUI page can use one: an `SkUiImage` behind the content does it); clones of other vendors' controls; `{TemplateBinding}` and `RelativeSource TemplatedParent` in drawn templates (MAUI resolves them through an internal interface; the migration checker rewrites them to `RelativeSource AncestorType`); reading platform-specific attached properties at runtime (the checker converts the ones with a SkiaUi member, and their other drawn meanings are SkiaUi members in the backlog); `SafeAreaEdges` on drawn views inside a surface (only the surface root applies it, so layout does not depend on where a view is in the window); a Core flex layout (Core uses the wrap and shrink layouts and the grid); a separate Core assembly without `Microsoft.Maui.Controls` (a Core tree draws only inside an `SkUiView` such as `SkUiCoreHost`, and the engines it shares with the SkUi\* layer, the look, popups, text input and accessibility all run on MAUI Controls, so an app could not drop the dependency; the Core API also takes MAUI's `FontAttributes` and `DataTemplate`, which 1.x keeps).
