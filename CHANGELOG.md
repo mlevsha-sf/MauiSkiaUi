@@ -18,6 +18,8 @@ Publishing (the NuGet publish workflow, [docs/Releasing.md](docs/Releasing.md)) 
 
 ## Unreleased
 
+## 1.6.0
+
 ### New features
 
 - **Viewport insets:** `ViewportInsets` (`Thickness`, default none) on `SkUiScrollView` (and so `SkUiVirtualScrollView`), `SkUiCoreScrollView` (`SetViewportInsets`) and `SkUiCollectionView` says which parts of the viewport are covered by views drawn over the scroller, so an edge-to-edge page scrolls its content under translucent bars with nothing covered at the ends of the range. `Padding` keeps its meaning.
