@@ -452,7 +452,7 @@ public class SkUiRefreshView : SkUiView, ISkUiRefreshOwner
             gap = -host.Scroller.OverscrollY;
             device = host.Scroller.DragDevice;
             if (inline)
-                top = TopOf(host);
+                top = TopOf(host) + host.Scroller.Cover.Top - _layerTop;
         }
         Refresh.ShowPull(IsRefreshing || CanRefresh ? gap : 0, top, device);
     }
@@ -460,6 +460,10 @@ public class SkUiRefreshView : SkUiView, ISkUiRefreshOwner
     /// <summary>Where <paramref name="host"/> starts below this view's top, in DIPs (0 when not on a surface).</summary>
     private double TopOf(ISkUiScrollHost host) =>
         SkUiDiagnostics.GetRootBounds(host) is { } bounds && SkUiDiagnostics.GetRootBounds(this) is { } own ? bounds.Top - own.Top : 0;
+
+    /// <summary>How far <paramref name="host"/> ends above this view's bottom, in DIPs (0 when not on a surface).</summary>
+    private double BelowOf(ISkUiScrollHost host) =>
+        SkUiDiagnostics.GetRootBounds(host) is { } bounds && SkUiDiagnostics.GetRootBounds(this) is { } own ? own.Bottom - bounds.Bottom : 0;
 
     /// <summary>What a pull pulled: a scroller of the content, or the view itself.</summary>
     private enum PullSource
@@ -596,7 +600,9 @@ public class SkUiRefreshView : SkUiView, ISkUiRefreshOwner
     }
 
     /// <summary>The first vertical drawn scroller of the content, breadth first (not inside a nested refresh view).</summary>
-    private SkUiScrollController? FirstContentScroller()
+    private SkUiScrollController? FirstContentScroller() => FirstContentScrollHost()?.Scroller;
+
+    private ISkUiScrollHost? FirstContentScrollHost()
     {
         // Never re-entered: the search lists are reused per thread and emptied afterwards (they keep no node alive).
         var queue = _searchQueue ??= new Queue<ISkUiRenderable>();
@@ -608,7 +614,7 @@ public class SkUiRefreshView : SkUiView, ISkUiRefreshOwner
             {
                 var node = queue.Dequeue();
                 if (node is ISkUiScrollHost host && host.Scroller.Vertical)
-                    return host.Scroller;
+                    return host;
                 if (node is SkUiRefreshView)
                     continue;
                 children.Clear();
@@ -836,8 +842,32 @@ public class SkUiRefreshView : SkUiView, ISkUiRefreshOwner
     {
         var bounds = new Rect(Point.Zero, size);
         ((IView)_contentPart).Arrange(bounds);
-        ((IView)Refresh.Layer).Arrange(bounds);
+        ((IView)Refresh.Layer).Arrange(IndicatorArea(bounds));
     }
+
+    /// <summary>
+    /// Where the indicator shows: all of the view, or, when views drawn over the content's first vertical scroller cover it
+    /// (<see cref="SkUiScrollView.ViewportInsets"/>), what they leave, so the indicator comes down from under the top bar and
+    /// stays above the bottom one. The keyboard does not count: it is no view of this surface, and moves no layer.
+    /// </summary>
+    private Rect IndicatorArea(Rect bounds)
+    {
+        _layerTop = 0;
+        if (FirstContentScrollHost() is not { } host)
+            return bounds;
+        // Before mirroring, as the layer is arranged.
+        var cover = host.Scroller.FlowCover;
+        var coverBottom = host.Scroller.DrawnCover.Bottom;
+        // Exact: nothing covers the scroller.
+        if (cover.Top == 0 && cover.Left == 0 && cover.Right == 0 && coverBottom == 0)
+            return bounds;
+        _layerTop = cover.Top == 0 ? 0 : Math.Min(bounds.Height, TopOf(host) + cover.Top);
+        var layerBottom = coverBottom == 0 ? bounds.Height : bounds.Height - BelowOf(host) - coverBottom;
+        return new Rect(cover.Left, _layerTop, Math.Max(0, bounds.Width - cover.HorizontalThickness), Math.Max(0, layerBottom - _layerTop));
+    }
+
+    // Where the indicator's layer starts below this view's top.
+    private double _layerTop;
 
     /// <summary>Hosts the content.</summary>
     private sealed class ContentPart : SkUiContentView;
