@@ -62,9 +62,10 @@ await image.LoadingTask; // wait for success or error publication
 
 | Source | Resolves to |
 | --- | --- |
-| `FileImageSource`, relative (`"dotnet_bot.png"`) | The **`MauiImage`** Resizetizer made for the display density: an Android drawable (density bucket), iOS / Mac Catalyst `name@3x.png` / `@2x` / `name.png`, Windows `name.scale-NNN.png`. An SVG item is referenced by its generated `.png` name, as in MAUI. If there is no MauiImage of that name, a **`MauiAsset`** in Resources/Raw. |
+| `FileImageSource`, relative (`"dotnet_bot.png"`) | The **`MauiImage`** Resizetizer made for the display density: an Android drawable (density bucket), iOS / Mac Catalyst `name@3x.png` / `@2x` / `name.png`, Windows `name.scale-NNN.png`. An SVG item is referenced by its generated `.png` name, as in MAUI. If there is no MauiImage of that name, a **`MauiAsset`** in Resources/Raw; an `.svg` asset is drawn at runtime. |
 | `FileImageSource`, absolute path | The file. |
 | `UriImageSource` (HTTP(S)) | A download. With `CachingEnabled` (default) the bytes go into the disk cache for `CacheValidity` (default 1 day). Plain `http://` needs the platform's cleartext permission (Android `usesCleartextTraffic` / network security config, iOS App Transport Security). |
+| `SkUiVectorImageSource` | An SVG icon: `Source` (a string, as `Image.Source`), `Color` (the starting value of `currentColor`; `null`: black), `Size` (the longest edge in DIPs; 0: the file's). A changed property draws it again. A `MauiImage` of that name wins, and then `Color` and `Size` do nothing. Core: `SkUiImageSource.FromVector` / `FromVectorText`. |
 | `StreamImageSource` (`ImageSource.FromStream`, `FromResource`) | The stream's bytes. Not cached: the factory may return different content each time. |
 | `FontImageSource` | The glyph, drawn through the text engine: fonts from `ConfigureFonts` / `SkUiFonts`, ligatures (icon names), per-character fallback. The image is the text's advance wide and its line high, rasterized at the display density, in `Color` (white when unset, as MAUI). Synchronous. |
 
@@ -145,6 +146,45 @@ over the placeholder it replaces:
   per dispatcher turn: the chunks received meanwhile are one report.
 - Views that share one load (the same cache key, decode size and transformations, started while it runs) all hear it; a view whose source changed hears no
   more of the old one.
+
+## Vector icons
+
+An `.svg` draws at runtime through a small reader in `SkiaUi.Maui`, with no extra package: sharp at the size the view has, and in the color the theme asks for. Ship the file as a `MauiAsset`. The default `Resources/Images/*` item would turn it into a PNG at build time, so keep runtime icons in `Resources/Raw`:
+
+```xml
+<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+```
+
+```xml
+<!-- A MauiAsset: currentColor is black, as SVG says -->
+<sk:SkUiImage Source="check.svg" WidthRequest="32" HeightRequest="32" />
+
+<!-- Color is the starting value of currentColor; Size is the longest edge in DIPs (default: the file's size) -->
+<sk:SkUiImage>
+    <sk:SkUiImage.Source>
+        <sk:SkUiVectorImageSource Source="check.svg" Color="{AppThemeBinding Light=Black, Dark=White}" Size="24" />
+    </sk:SkUiImage.Source>
+</sk:SkUiImage>
+```
+
+`SkUiVectorImageSource` is shaped like `FontImageSource`, so it works in every image property of the SkUi\* controls: `SkUiButton.ImageSource`, `SkUiSlider.ThumbImageSource`, `SkUiAvatarView.ImageSource`, placeholders. Changing a property draws the icon again, and a new color or size keeps the old one shown until then. Its `Source` is a string, read as `Image.Source`'s is. MAUI's native `Image` does not know it. Core: `SkUiImageSource.FromVector(source, color, size)` and `FromVectorText(svg, color, size)`.
+
+The reader works from any source that reads bytes (`Source="https://…/check.svg"`, a file, a stream), with the same caches and load events. A response with a `text/*` or JSON content type is refused, as for any image, so a server must not send an SVG as `text/xml` or `text/plain`.
+
+- **Size:** the image measures at the file's size (or `Size`). `SkUiImage` and `SkUiImageButton` then draw it again in exact pixels at the size they show it, larger or smaller, when that differs by more than a pixel. `DownsampleWidth` / `DownsampleHeight` win, and `Aspect.Center` draws at the file's size or `Size`. Button icons and slider thumbs draw at the file's size or `Size`, avatars at their content size, and placeholders at the image's decode bounds when it has any. A transformation that crops a non-square icon (`SkUiCircleTransformation`) gets exact pixels with `Aspect.AspectFill`; with a fitting aspect it has fewer pixels than the view shows.
+- **Redraws are loads:** each raises the load events and reads the source again, which is the disk cache for a download by default, and the file for an asset. A stream or an uncached download is read once per size. In a view of another size, the first load is at the file's size and the redraw follows, so an icon loads twice the first time; an `SkUiVectorImageSource` set on a view that already has a size (a new color, a recycled row) goes straight to that size.
+- **Colors:** `Color` is the starting value of `currentColor`, and colors written in the file stay. A `color` written in the file (on the root or a group) wins for what is inside it: remove it for `Color` to apply. `SkUiTintTransformation` still recolors a whole file.
+- **Same name:** a `MauiImage` of that name, or an Android drawable, wins over the asset. Then it is that image: `Color` and `Size` do nothing.
+
+**What it draws:** `path`, `rect`, `circle`, `ellipse`, `line`, `polyline`, `polygon`, `g`, `a`, `defs`, `clipPath`, `mask`, `style` with `.class` rules, and one-line `text`. Fill and stroke with their inheritance, dashes, opacity, transforms, `viewBox` and `preserveAspectRatio`; colors as hex, `rgb()`, `rgba()`, CSS names and `currentColor`.
+
+**What fails:** gradients, `image`, `use`, `symbol`, `pattern`, `filter`, `foreignObject`, `tspan`, `textPath`, `marker`, `switch`, a nested `svg`, selectors other than a class, blend modes, a `paint-order` that strokes first, `vector-effect`, a `transform-origin` other than zero, other colors (`hsl()`), lengths in `%` or `em` on shapes, clips and masks with content in `objectBoundingBox` units, a mask region smaller than the element in them, text with a list of positions, and text in a `clipPath`. The load fails with a `LoadError` naming what stopped it, instead of drawing an icon with a part missing. Elements it does not know (`title`, `metadata`, `script`, the `animate` elements, a design tool's own) are skipped with their content, unknown properties are ignored, and a `clip-path` or `mask` naming an id the file lacks draws unclipped. An animated file draws its first state.
+
+A file cannot reach outside itself: no element makes a request or reads a file, a DTD is skipped, and its entities are not expanded. Limits: 1 MiB, 20,000 elements, 64 levels of nesting, a size up to 1,000,000 DIPs a side, and a budget of work for the cascade and for drawing, so a small file cannot hold a thread for long. Beyond them it is a `LoadError`, and a load that is no longer wanted stops.
+
+Try it in the samples app ("Icons from SVG files") and the demo's gallery ("SkUiImage: SVG icons at runtime").
+
+**When to use a `MauiImage` instead:** artwork with gradients or embedded images, app icons and splash screens, and native `Image` views. An `.svg` `MauiImage` is a PNG made at build time, which the reader never sees, so anything goes. Costs compared: [Performance.md](../Performance.md#vector-icons).
 
 ## Android XML drawables
 
@@ -280,7 +320,7 @@ Animated GIF / WebP play on the view's UI clock while `IsAnimationPlaying` is tr
 | Screen readers | An image is read only with `SemanticProperties.Description` (or `AutomationProperties.IsInAccessibleTree="True"`); an image button is a button named by its description |
 | `IsOpaque` | Accepted for MAUI markup; a hint for platform image views, so drawn images draw the same either way |
 | `IsLoading` | As MAUI's, also as the read-only `IsLoadingProperty` for triggers and bindings. A load started without a dispatcher finishes on the thread pool: it raises `IsLoading` there, and the stored value (what triggers read) follows on the view's next change |
-| SVG at runtime | Not yet: an SVG `MauiImage` works (as the PNG generated at build time); drawing `.svg` files at runtime is planned ([roadmap](../design/Roadmap.md#new-controls-and-packages)) |
+| SVG at runtime | SkiaUi draws icons at runtime, which MAUI's `Image` does not: see [Vector icons](#vector-icons). An SVG `MauiImage` keeps working as the PNG generated at build time |
 | Size limits | 32 MiB encoded; decoded edge ≤ `MaxDecodeDimension` (2048 px) |
 | Disposal | Not needed (images are not `IDisposable`): a collected image releases its reference on the shared cache by itself; set `Source` to `null` (Core: `Clear()`) to release it at once |
 

@@ -215,10 +215,25 @@ public class SkUiCoreImage : SkUiCoreNode
         var old = _aspect;
         if (!SetProperty(ref _aspect, value, nameof(Aspect))) return this;
         InvalidatePaint();
+        if (_slot.Entry is { IsVector: true })
+        {
+            if (value == Aspect.Center && old != Aspect.Center)
+            {
+                _viewSizedDecode.Stop();
+                _viewSizedDecode.ForgetVector();
+                _slot.Load(_source, _options, keepShown: true); // drawn unscaled: at its own size, not the view's
+            }
+            else
+            {
+                InvalidateMeasure(); // the next arrange draws it for this aspect
+            }
+        }
         // Fitting and covering decode to different bounds; a centered image is not downsampled to the node.
-        if (_downsampleToViewSize && _source is not null
+        else if (_downsampleToViewSize && _source is not null
             && (SkUiViewSizedDecode.Fills(old) != SkUiViewSizedDecode.Fills(value) || (old == Aspect.Center) != (value == Aspect.Center)))
+        {
             Load(restart: false);
+        }
         return this;
     }
 
@@ -342,6 +357,13 @@ public class SkUiCoreImage : SkUiCoreNode
     // A new source (restart) waits for the next arrange with DownsampleToViewSize; new settings reuse the bounds decided.
     private Task Load(bool restart)
     {
+        _viewSizedDecode.ForgetVector();
+        if (SkUiViewSizedDecode.ForVectorSource(_source, ImageArea(Frame.Size), _options, _aspect, out var sized))
+        {
+            _viewSizedDecode.Stop();
+            _viewSizedDecode.MarkSizedAsVector();
+            return _slot.Load(_source, sized);
+        }
         if (_source is null || !SkUiViewSizedDecode.AppliesTo(_downsampleToViewSize, _options, _aspect))
         {
             _viewSizedDecode.Stop();
@@ -361,10 +383,31 @@ public class SkUiCoreImage : SkUiCoreNode
     protected override void ArrangeContent(Size size)
     {
         base.ArrangeContent(size);
+        if (_slot.TryGetVector(out var idle, out var intrinsic, out var pixels))
+        {
+            // One redraw at a time: the one finishing invalidates the measure, so this runs again with the latest size. A
+            // redraw would end a fade: it waits for the fade's end, which comes back here too.
+            if (idle && _viewSizedDecode.FollowVector(ImageArea(size), intrinsic, pixels, _options, _aspect, out var redraw))
+                _slot.Load(_source, redraw, keepShown: true);
+            return;
+        }
+        var sizedBitmap = idle && _source is not null && _slot.Entry is not null && _viewSizedDecode.TakeSizedBitmap();
+        if (sizedBitmap)
+        {
+            if (!_downsampleToViewSize)
+            {
+                _slot.Load(_source, _options, keepShown: true);
+                return;
+            }
+            _viewSizedDecode.Wait();
+        }
         // A view that outgrew an image decoded at full size keeps it: larger bounds give no more pixels.
         if (_viewSizedDecode.OnArranged(size, out var grew) && !(grew && _slot.Entry is { IsReduced: false }))
-            _slot.Load(_source, _viewSizedDecode.Apply(_options, _aspect), keepShown: grew);
+            _slot.Load(_source, _viewSizedDecode.Apply(_options, _aspect), keepShown: grew || sizedBitmap);
     }
+
+    /// <summary>The part of the arranged <paramref name="size"/> the image is drawn in.</summary>
+    private protected virtual Size ImageArea(Size size) => size;
 
     private void PublishState()
     {
@@ -413,6 +456,8 @@ public class SkUiCoreImage : SkUiCoreNode
             return;
         _fade.ForgetDrawable();
         _slot.EndFade();
+        if (_slot.Entry is { IsVector: true } || _viewSizedDecode.IsSizedAsVector)
+            InvalidateMeasure(); // the redraw or reload that waited for the fade
         InvalidatePaint();
         InvalidateRender(SkUiRenderDirty.Props);
     }

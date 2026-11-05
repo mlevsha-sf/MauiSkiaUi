@@ -111,6 +111,50 @@ First frame of the 400-card list (ms):
 - **Defer expensive panes** (other tabs, hidden or collapsed sections): `SkUiContentView ContentLoading="WhenShown"` with a `ContentTemplate` creates a pane only when it is first shown (optionally after a delay, so tabs passed through are not created) ([SkUiContentView.md](controls/SkUiContentView.md#loading-content-when-shown)).
 - Check on the slowest device you support. The iPhone 8 absorbs every single effect; the S9 shows where the limits are.
 
+## Vector icons
+
+**Eight 24 dp gear icons** (45 to 73 path verbs each), as `.svg` files drawn by the [reader](controls/SkUiImage.md), as PNGs of the screen's pixels (what a `MauiImage` is) recolored with a tint, and as font glyphs. Measured on 5 November 2026 with `scripts/bench.sh` on the same two phones, Release builds, SDK 10.0.402, MAUI 10.0.120, SkiaSharp 4.154.0.
+
+**Loading**, off the UI thread and not cached:
+
+| | S9 SVG | S9 PNG | S9 font | iPhone 8 SVG | iPhone 8 PNG | iPhone 8 font |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| First icon in the process (ms, median of 3 launches) | 259 | 160 | 263 | 26 | 19 | 46 |
+| Each further icon (ms, 200 loads, each kind in its own process) | 0.93 | 0.52 | 0.21 | 0.19 | 0.16 | 0.05 |
+
+The bench writes its files before it starts timing, so the first row is the load alone. On the S9, a decode was about 20 µs for the codec to refuse the bytes, 120 µs to parse and 240 µs to draw at 72 px; the rest is the file read and the load's own work. In a process that had just built the 1,000-icon trees below, the S9 took 3.4 ms per SVG and 0.9 ms per PNG. The cause was not investigated: it runs off the UI thread, and memory pressure is the likely reason.
+
+**1,000 icons once loaded**, about 50 per screen, in ms. *Update* is a new color on all of them (a theme change's work on the UI thread; the eight loads a color needs the first time run off it); *Scroll* is an animated scroll.
+
+**Galaxy S9**
+
+| Layer, icon | Generate | Add | First frame | Update | Scroll |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SkUi*, SVG | 241 | 25 | 127 | 126 | 58.4 fps, 5.7 ms per frame |
+| SkUi*, PNG | 213 | 24 | 112 | 181 | 60.5 fps, 5.4 ms per frame |
+| SkUi*, font | 158 | 18 | 121 | 176 | 56.6 fps, 7.2 ms per frame |
+| Core, SVG | 36 | 16 | 50 | 141 | 57.6 fps, 6.6 ms per frame |
+| Core, PNG | 52 | 4 | 51 | 139 | 57.8 fps, 6.5 ms per frame |
+| Core, font | 39 | 16 | 50 | 147 | 56.2 fps, 6.8 ms per frame |
+
+**iPhone 8**
+
+| Layer, icon | Generate | Add | First frame | Update | Scroll |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SkUi*, SVG | 120 | 15 | 35 | 47 | 59.9 fps, 6.3 ms per frame |
+| SkUi*, PNG | 80 | 11 | 27 | 42 | 59.9 fps, 6.2 ms per frame |
+| SkUi*, font | 158 | 17 | 42 | 54 | 59.9 fps, 6.2 ms per frame |
+| Core, SVG | 38 | 2 | 14 | 45 | 59.2 fps, 6.3 ms per frame |
+| Core, PNG | 41 | 2 | 13 | 42 | 59.7 fps, 6.2 ms per frame |
+| Core, font | 40 | 2 | 14 | 42 | 59.2 fps, 6.2 ms per frame |
+
+The scenarios create the SkUi\* layer's SVG sources by name, so a baseline without them still builds: that part of its *Generate* is the bench's.
+
+- **Once loaded, an SVG icon costs what a PNG does:** it is a bitmap of the same size, and scrolling is within noise on both phones.
+- **An uncached SVG** costs about what a PNG does on the iPhone 8 and up to twice as much on the S9, off the UI thread. A font glyph is faster to load, but it renders on the UI thread.
+- **The first icon needs no warm-up.** The S9 shows it about 100 ms later than a PNG, once per process and without blocking the UI thread, about what a font glyph takes; the iPhone 8 shows it a few ms later.
+- **A theme change** on a screen of 50 icons from 20 files should take under 10 ms on the S9's UI thread and 20 loads off it (about 19 ms of work). This is worked out from the numbers above, not measured on such a screen.
+
 ## Reproducing
 
 Both stress pages are in the demo app (`MauiSkiaUiDemo`): **Stress** (the 1,000-button grid) and **Effects stress** (the card list, with **Matrix** in the toolbar for every effect). Run a Release build. Scripted runs start a page and print one `data` line per round (key=value, ms) to the console:
@@ -126,6 +170,8 @@ mlaunch --launchdev MauiSkiaUiDemo.app --devname <udid> --wait-for-exit:true --s
     --setenv=SKUI_DEMO_ROUTE=stress --setenv=SKUI_STRESS=run --setenv=SKUI_STRESS_LAYER=core \
     --setenv=SKUI_STRESS_ROUNDS=4 --setenv=SKUI_STRESS_SCROLL=1
 ```
+
+The vector icon numbers come from the bench app: `scripts/bench.sh -t android -S skui-icons-svg,skui-icons-png,skui-icons-font`, and `core-icons-*`, `icon-load-*`; `icon-first-*` with `-n 1 -w 0`, alone, once per launch. An iPhone on iOS 16 may need `SKUI_MLAUNCH_SDKROOT` ([Benchmarks.md](design/Benchmarks.md#running)).
 
 | Variable | Values |
 | --- | --- |

@@ -18,6 +18,9 @@ public abstract record SkUiImageSource
     /// </summary>
     internal abstract string? CacheKey { get; }
 
+    /// <summary>The source that reads the bytes: this one, or the one a vector source wraps.</summary>
+    internal virtual SkUiImageSource BytesSource => this;
+
     /// <summary>
     /// Loads and decodes the image. Runs on the caller's thread until its first await; work that completes without
     /// awaiting (font glyphs) makes the whole load synchronous, so the image shows without a frame's delay.
@@ -28,7 +31,8 @@ public abstract record SkUiImageSource
     /// A file: an absolute path, or a name in the app package. A package name resolves like MAUI's <c>FileImageSource</c>:
     /// first the build-processed <c>MauiImage</c> for the display density (Android drawables, iOS / Mac Catalyst
     /// <c>@2x</c> / <c>@3x</c> bundle files, Windows <c>.scale-NNN</c> files; an <c>.svg</c> item is referenced by its
-    /// generated <c>.png</c> name), then a <c>MauiAsset</c> in Resources/Raw.
+    /// generated <c>.png</c> name), then a <c>MauiAsset</c> in Resources/Raw. An <c>.svg</c> file or asset is drawn at
+    /// runtime, as any source's SVG bytes are (<see cref="SkUiImageDecoder"/>); a <c>MauiImage</c> of the same name wins.
     /// </summary>
     public static SkUiImageSource FromFile(string path) => new SkUiFileImageSource(path);
 
@@ -60,8 +64,41 @@ public abstract record SkUiImageSource
         new SkUiFontImageSource(glyph, fontFamily, size, color, fontAttributes, fontAutoScalingEnabled);
 
     /// <summary>
+    /// An SVG icon from <paramref name="source"/> (a file or package name, a URI, a stream). <paramref name="color"/> is the starting value of <c>currentColor</c> (<c>null</c>: black, as SVG
+    /// says); colors written in the file stay. <paramref name="size"/> is the longest edge in DIPs (0: the file's size).
+    /// Bytes that are not an SVG, such as a <c>MauiImage</c> of that name, show as they are.
+    /// </summary>
+    public static SkUiImageSource FromVector(SkUiImageSource source, Color? color = null, double size = 0)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return source switch
+        {
+            SkUiVectorSource vector => new SkUiVectorSource(vector.Inner, vector.Text, color, size),
+            SkUiFontImageSource => throw new ArgumentException("A font glyph is not an SVG: use a file, a URI or a stream.", nameof(source)),
+            _ => new SkUiVectorSource(source, null, color, size)
+        };
+    }
+
+    /// <summary>
+    /// An SVG icon from a file name, path or HTTP(S) URI, read as <see cref="FromString"/> does; otherwise as
+    /// <see cref="FromVector(SkUiImageSource, Color?, double)"/>.
+    /// </summary>
+    public static SkUiImageSource FromVector(string source, Color? color = null, double size = 0)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        return FromVector(FromString(source)!, color, size);
+    }
+
+    /// <summary>An SVG icon from its text, as <see cref="FromVector(SkUiImageSource, Color?, double)"/>; views of the same text, color and size share one image.</summary>
+    public static SkUiImageSource FromVectorText(string svg, Color? color = null, double size = 0)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(svg);
+        return new SkUiVectorSource(null, svg, color, size);
+    }
+
+    /// <summary>
     /// The source for a MAUI <c>ImageSource</c>, as the SkUi* controls draw it: a file or <c>MauiImage</c>, a URI with its cache
-    /// options, a stream or a font glyph. A snapshot: later changes of <paramref name="source"/> are not followed (set the
+    /// options, a stream, a font glyph or an SVG icon (<see cref="SkUiVectorImageSource"/>). A snapshot: later changes of <paramref name="source"/> are not followed (set the
     /// converted source again). <c>null</c> for no or an empty source; an unsupported or invalid source becomes one that fails
     /// to load, so the error shows in <c>LoadError</c>.
     /// </summary>
@@ -79,8 +116,9 @@ public abstract record SkUiImageSource
                 // MAUI 10's FontImageSource has no FontAttributes: a bold or italic glyph comes from its FontFamily's face.
                 FontImageSource font => FromFont(font.Glyph, font.FontFamily, font.Size, font.Color,
                     fontAutoScalingEnabled: font.FontAutoScalingEnabled),
+                SkUiVectorImageSource vector => FromVector(vector.Source!, vector.Color, vector.Size),
                 _ => new SkUiFailedImageSource(new NotSupportedException(
-                    $"{source.GetType().Name} is not supported: use a file, MauiImage, raw package asset, stream, font or HTTP(S) source."))
+                    $"{source.GetType().Name} is not supported: use a file, MauiImage, raw package asset, stream, font, vector or HTTP(S) source."))
             };
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException)

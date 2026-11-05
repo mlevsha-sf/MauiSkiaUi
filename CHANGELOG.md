@@ -18,6 +18,20 @@ Publishing (the NuGet publish workflow, [docs/Releasing.md](docs/Releasing.md)) 
 
 ## Unreleased
 
+### New features
+
+- **Vector icons:** an `.svg` file, `MauiAsset`, download or stream now draws at runtime on both layers (`Source="check.svg"`), through a small SVG reader in `SkiaUi.Maui` with no new dependency. It is drawn again at the size its view shows it in exact pixels, larger or smaller, on `SkUiImage`, `SkUiImageButton` and their Core twins; explicit decode bounds win. A `MauiImage` of the same name still wins. A file with something the reader knows it cannot draw (a gradient, `<use>`, an embedded image) fails with a `LoadError` naming it, and a file cannot make requests or hold a thread for long.
+  - `SkUiVectorImageSource`, a MAUI `ImageSource` shaped like `FontImageSource`, works in every image property of the SkUi* controls: `Source`, `Color` (the starting value of `currentColor`; colors written in the file stay) and `Size` (the longest edge in DIPs). `Color` takes `AppThemeBinding`, `DynamicResource` and bindings, and a new color keeps the icon shown until it is drawn.
+  - Core: `SkUiImageSource.FromVector(source, color, size)` and `FromVectorText(svg, color, size)`.
+  - Once loaded, an icon costs what a PNG of its size does: [Performance.md](docs/Performance.md#vector-icons).
+  - The samples app's "Icons from SVG files" example and the gallery's "SVG icons at runtime" page; how to use them: [SkUiImage.md](docs/controls/SkUiImage.md#vector-icons), and moving icons over: [Migration.md](docs/Migration.md#icons-fontimagesource-tint-behaviors-mauiimage-svgs).
+
+### Fixes
+
+- **No backdrop flashing through resized GPU surfaces on Windows:** a hardware-accelerated surface being resized (a splitter drag, a window resize, anything that changes its layout) showed strips of the window's backdrop at its edges and, for a frame, stretched content. WinUI does not synchronize a swap chain's presents with its own layout, so a swap chain resized with its slot could be shorter than what XAML showed. The swap chain panel is now longer than its slot and clipped to it, and changes only when the slack runs out, so most resizes do not touch the swap chain. A surface starts with 192 epx of slack per direction; one that outgrows it takes 384, and keeps up to 768. Still open: a resize of more than 96 epx in one layout pass can show a gap for a frame, and each change of the panel can flash the whole surface for a frame; a drag back and forth now changes it once instead of twice per sweep.
+- **No exception when a touch closes its own surface:** a release can disconnect the surface's handler while the touch is still being handled (such as the pick that closes a picker's popup); code reading the handler's view afterwards (the demo's input trace on Windows, a frame already queued) threw `InvalidOperationException: VirtualView cannot be null here`.
+- **`SkUiAvatarView` follows edits of its image source:** changing a property of a live source (a `FontImageSource`'s `Color`, a `UriImageSource`'s `Uri`) reloaded the old values.
+
 ## 1.6.0
 
 ### New features

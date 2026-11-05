@@ -6,7 +6,8 @@ namespace MauiSkiaUi;
 /// Shared off-UI-thread image decoding for both layers. Large sources are decoded down to <see cref="MaxDecodeDimension"/>
 /// or a view's downsample size (using the codec's native subsampling where supported, e.g. JPEG/WebP), so a 12 MP photo
 /// does not cost ~48 MB of memory. Layout still uses the source size, so markup behaves the same. JPEG EXIF orientation is
-/// applied, and animated GIF / WebP decode to all their frames.
+/// applied, and animated GIF / WebP decode to all their frames. Bytes no codec knows that start like XML are read as a
+/// vector icon (<see cref="SkUiVectorDocument"/>), for every source that reads bytes.
 /// </summary>
 public static class SkUiImageDecoder
 {
@@ -35,12 +36,20 @@ public static class SkUiImageDecoder
     /// <paramref name="sourceScale"/> (pixels per DIP: 3 for an Android xxhdpi drawable or an iOS <c>@3x</c> file).
     /// <paramref name="maxPixels"/> bounds the decoded size per axis (0: unbounded), on top of <see cref="MaxDecodeDimension"/>;
     /// with <paramref name="fill"/> and both bounds, the image is decoded just large enough to cover them (aspect fill).
-    /// Images are never upscaled.
+    /// Images are never upscaled. A vector is: it is drawn at the bounds, larger ones too, or else at its intrinsic size ×
+    /// <paramref name="displayScale"/>, with <paramref name="vector"/>'s color and size when it comes from such a source.
     /// </summary>
-    internal static SkUiDecodedImage Decode(byte[] bytes, float sourceScale = 1, SKSizeI maxPixels = default, bool fill = false)
+    internal static SkUiDecodedImage Decode(byte[] bytes, float sourceScale = 1, SKSizeI maxPixels = default, bool fill = false,
+        float displayScale = 1, SkUiVectorSource? vector = null, CancellationToken token = default)
     {
         using var data = SKData.CreateCopy(bytes);
-        using var codec = SKCodec.Create(data) ?? throw new InvalidDataException("Unsupported or corrupt image.");
+        using var codec = SKCodec.Create(data);
+        if (codec is null)
+        {
+            return SkUiVectorDocument.LooksLikeSvg(bytes)
+                ? DrawVector(SkUiVectorDocument.Parse(bytes, token), sourceScale, maxPixels, fill, displayScale, vector, token)
+                : throw new InvalidDataException("Unsupported or corrupt image.");
+        }
         var origin = codec.EncodedOrigin;
         var swaps = SwapsAxes(origin);
         var encoded = new SKSizeI(codec.Info.Width, codec.Info.Height);
@@ -57,6 +66,20 @@ public static class SkUiImageDecoder
         using var decoded = DecodeStill(codec, encoded, targetEncoded);
         using var upright = Orient(decoded, origin);
         return new SkUiDecodedImage([ToImage(upright ?? decoded)], [], size) { IsReduced = reduced };
+    }
+
+    internal static SkUiDecodedImage DrawVector(SkUiVectorDocument document, float sourceScale, SKSizeI maxPixels, bool fill, float displayScale,
+        SkUiVectorSource? vector, CancellationToken token)
+    {
+        var size = new Size(document.Size.Width / (double)sourceScale, document.Size.Height / (double)sourceScale);
+        if (vector is { Size: > 0 and var longest })
+        {
+            var scale = longest / Math.Max(size.Width, size.Height);
+            size = new Size(size.Width * scale, size.Height * scale);
+        }
+        var pixels = SkUiPackageImages.RenderSize(size.Width * displayScale, size.Height * displayScale, maxPixels, fill);
+        var image = SkUiVectorPainter.Render(document, pixels, vector?.CurrentColor ?? SKColors.Black, token);
+        return new SkUiDecodedImage([image], [], size) { IsReduced = true, IsVector = true };
     }
 
     /// <summary>
@@ -243,6 +266,9 @@ internal sealed record SkUiDecodedImage(SKImage[] Frames, int[] Durations, Size 
     /// </summary>
     public bool IsReduced { get; init; }
 
+    /// <summary>Whether this is a drawn SVG, which a view draws again at the size it shows it (<see cref="SkUiViewSizedDecode"/>).</summary>
+    public bool IsVector { get; init; }
+
     /// <summary>Decoded pixel memory of all frames.</summary>
     public long Bytes
     {
@@ -260,5 +286,5 @@ internal sealed record SkUiDecodedImage(SKImage[] Frames, int[] Durations, Size 
     /// (<paramref name="dipsPerPixel"/>, measured before the transformation replaced the originals).
     /// </summary>
     public SkUiDecodedImage WithFrames(SKImage[] frames, SKSize dipsPerPixel) =>
-        new(frames, Durations, new Size(frames[0].Width * dipsPerPixel.Width, frames[0].Height * dipsPerPixel.Height)) { IsReduced = IsReduced };
+        new(frames, Durations, new Size(frames[0].Width * dipsPerPixel.Width, frames[0].Height * dipsPerPixel.Height)) { IsReduced = IsReduced, IsVector = IsVector };
 }
