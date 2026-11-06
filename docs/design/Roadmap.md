@@ -82,10 +82,12 @@ One feature: an app's `.svg` icons drawn at runtime on both layers, through a sm
 
 ### 1.8.0: Markdown (planned)
 
+Built on the branch `1.8-implementation`, not released: [how to use it](../controls/SkUiMarkdownView.md), [what it costs](../Performance.md#markdown).
+
 One feature: a drawn Markdown view on both layers, in new optional packages, with no new dependency in `SkiaUi.Maui`. Steps, order, a spike's findings and open decisions: [ImplementationPlan-1.8.md](ImplementationPlan-1.8.md).
 
 - **View:** `SkUiMarkdownView` + `SkUiCoreMarkdown` in `SkiaUi.Maui.Markdown` on Markdig: text, quotes, alerts, code, lists, tables, images and links, styled by one style object over the color scheme; a growing text only rebuilds its tail.
-- **Untrusted documents:** nothing opens or loads by itself beyond what an image resolver allows, and hostile input cannot take the app down.
+- **Untrusted documents:** nothing opens by itself, remote images stay off until an app allows them, a document cannot read a local file, and hostile input cannot take the app down.
 - **Math:** block and inline LaTeX in `SkiaUi.Maui.Markdown.Math` on CSharpMath.
 - **In `SkiaUi.Maui`:** inline objects in text, a baseline shift on spans (real superscript and subscript) and a zoom view.
 
@@ -123,7 +125,7 @@ Multi-target the one `SkiaUi.Maui` package (`net10.0-*` plus `net11.0-*`) so app
 - **CollectionView:** a selected-item template, extended selection, keyboard item navigation, animated insert and remove.
 - **CarouselView / IndicatorView:** `VisibleViews`; autoplay, several items per snap point, a Core carousel.
 - **Gesture recognizers on drawn views:** `PanGestureRecognizer` with `TouchPoints` other than 1 (reported and not run since 1.2).
-- **Labels:** span press feedback, HTML images, `sub` / `sup`, block indents; one fitted size for a group of labels.
+- **Labels:** span press feedback, HTML images, block indents; one fitted size for a group of labels.
 - **Templates:** button image tint.
 - **Drawn meanings of platform-specifics,** as SkiaUi members on both layers: a tap on a slider's track that moves the thumb, swipe view transition modes (reveal / drag), the press ripple's color, search bar chrome (minimal / prominent); pulling from other edges is under [Lists and scrolling](#lists-and-scrolling).
 
@@ -140,6 +142,7 @@ Multi-target the one `SkiaUi.Maui` package (`net10.0-*` plus `net11.0-*`) so app
 - Virtual stack: a public horizontal layout, `VirtualScrollMode` (`InfiniteFeed`, `Loop`), `PrefetchDistance`, `QueryItemSize`, a load-more hook with a placeholder, a Core twin.
 - Scroll bars: the thumb shrinking during a bounce (iOS), repeated paging on a held track press; native overlays following a stretch.
 - Pull to refresh from other edges; render-thread effects linked to overscroll.
+- Markdown: long documents as virtualized rows, measuring and recording only the top-level blocks near the viewport (the first frame of a 100 KB document takes about 760 ms on the S9, [Performance.md](../Performance.md#markdown)). Not planned for now. Needs the virtual stack's Core twin or starts on `SkUiMarkdownView` only, and an opt-in way to scroll, since the view is as tall as its document today. Design notes: [1.8 plan, V2](ImplementationPlan-1.8.md#phase-v--long-documents).
 
 ### Looks, colors and motion
 

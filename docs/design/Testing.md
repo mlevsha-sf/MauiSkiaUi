@@ -63,6 +63,9 @@ start:
 - **CI machines are slower.** Wait for a state (a view committed, a load finished: `LeakScenarioContext.WaitForAsync`,
   a bounded loop of `SettleAsync`) instead of a fixed number of frames or milliseconds, and make a failed check say
   what each part's state was, so one CI log is enough to tell why.
+- **Timing is not a budget.** Forced GCs in the parallel tests and other processes can stretch a run many times over,
+  so a test about complexity compares how time grows between sizes, each keeping its fastest of many short runs
+  (`LongParagraphWrapsInLinearTime`), not a number of milliseconds. Absolute speed is what `scripts/bench.sh` is for.
 
 ## Memory leak tests
 
@@ -79,6 +82,7 @@ One scenario catalog, [`tests/Shared/MemoryLeaks`](../../tests/Shared/MemoryLeak
 | `TogglesTapped` | Switch, check boxes (one three-state), radio group, tapped several times |
 | `SlidersAndProgress` | Horizontal, vertical and Core sliders dragged and tapped; progress bars animating and indeterminate at close |
 | `LabelsReshaped` | Wrapped, truncated, RTL, Arabic, emoji, Simple / Shaped labels; text and width changed repeatedly |
+| `MarkdownRebuilt` | Markdown views on both layers with every kind of block, a long-lived command and formulas (the inline one is checked, so a formula engine trimmed away fails on a device): a link tapped, the text streamed in, the style changed |
 | `ContentTemplated` | Buttons with images (a long-lived shared icon edited while shown); radio buttons with text and view content and a long-lived shared `ControlTemplate`: tapped, content swapped, template removed and applied again; Core radio buttons grouped by `SkUiCoreRadioButtons.Group` with a long-lived callback |
 | `ImagesReloaded` | Stream images: sources swapped, reloaded, aspect changed |
 | `VectorIconsSwitched` | SVG icons on both layers: a shared `SkUiVectorImageSource` in images, an image button, a button and a slider thumb, recolored and resized while shown; a view growing and shrinking so its icon is drawn again; Core icons from text; a file the reader rejects |

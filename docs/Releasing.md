@@ -1,6 +1,6 @@
 # Releasing SkiaUi.Maui
 
-Every release publishes all of the repository's packages with one version: **SkiaUi.Maui** and **SkiaUi.Maui.CommunityToolkit** (which depends on SkiaUi.Maui of the same version). One changelog covers both. A new package added to the release loop of the pack and publish workflows needs, the first time, a nuget.org Trusted Publishing policy that covers it (or the push of its first version fails).
+Every release publishes all of the repository's packages with one version: **SkiaUi.Maui**, **SkiaUi.Maui.CommunityToolkit** and **SkiaUi.Maui.Markdown** (which depend on SkiaUi.Maui of the same version), and **SkiaUi.Maui.Markdown.Math** (which depends on SkiaUi.Maui.Markdown of the same version). One changelog covers them all. A new package added to the release loop of the pack and publish workflows needs, the first time, a nuget.org Trusted Publishing policy that covers it (or the push of its first version fails).
 
 ## Branches and versions
 
@@ -57,6 +57,8 @@ The workflow then:
 3. After the `nuget.org` environment gate (where reviewers approve, if required), commits `Release <version>` on top of the dispatch commit and pushes it together with the tag `v<version>` (`git push --atomic`). A stable release from `devel` pushes `master` to the same commit in that push, as a fast-forward (never forced). If a branch moved since the run started, the push is rejected and nothing is published or tagged: run it again.
 4. Pushes the package to nuget.org (Trusted Publishing), then creates the GitHub release `v<version>` with the notes and the package. Prereleases are marked as such. GitHub adds the source code (zip and tar.gz) to every release.
 5. Builds the demo and samples apps from the tag ([demo-publish.yml](../.github/workflows/demo-publish.yml)) and attaches them to the release: `SkiaUi-Demo-<version>-android-arm64.apk`, `SkiaUi-Demo-<version>-maccatalyst.zip`, and the same for `SkiaUi-Samples`. This runs after the package is published, so a failed app build does not hold it back: run **Demo publish** with `release_tag` = `v<version>` to attach them again. The same run attaches apps to an older release.
+
+**Before 1.8.0:** the open items in the [1.8 plan's status](design/ImplementationPlan-1.8.md#status) hold back this release: the iPhone 8 and Windows, app sizes, the LaTeX depth on those devices, and a screen reader pass. Its two packages are new ids on nuget.org, so a [Trusted Publishing](#setup) policy must cover them first. Remove this paragraph when they are done.
 
 **Dry run:** computes the version and packs, but doesn't commit, tag, push to nuget.org or create a release. The packages are uploaded as workflow artifacts.
 

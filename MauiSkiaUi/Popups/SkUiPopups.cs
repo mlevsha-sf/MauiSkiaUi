@@ -17,6 +17,79 @@ public static class SkUiPopups
     /// </summary>
     public static ISkUiPopupPresenter? Presenter { get; set; }
 
+    /// <summary>
+    /// Shows <paramref name="content"/> in the window, through <paramref name="presenter"/> or the app's <see cref="Presenter"/>, and completes once it is gone; a view of
+    /// the app's or a package's on the same contract as a picker's list (<see cref="ISkUiPopupPresenter"/>).
+    /// </summary>
+    /// <param name="anchor">The drawn view that opens it: its window and surface place the popup.</param>
+    /// <param name="content">What to show (a drawn view).</param>
+    /// <param name="preferredSize">The size wanted: kept inside the window's safe area, and inside the room a presenter reports while it shows (the part the soft keyboard leaves). Its width is decided at opening.</param>
+    /// <param name="presenter">The presenter; <c>null</c>: <see cref="Presenter"/>.</param>
+    /// <param name="opened">Gets the request, whose <see cref="SkUiPopupRequest.Cancel"/> closes the popup.</param>
+    /// <param name="cancellationToken">Closes the popup, on the thread that shows it. Already cancelled: nothing is shown.</param>
+    /// <returns><c>false</c> when nothing was shown: no presenter, no surface, or cancelled. One popup per control at a time is the rule of <see cref="ISkUiPopupPresenter"/>, and the caller's to keep.</returns>
+    public static async Task<bool> ShowContentAsync(SkUiView anchor, View content, Size preferredSize, ISkUiPopupPresenter? presenter = null,
+        Action<SkUiPopupRequest>? opened = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(anchor);
+        ArgumentNullException.ThrowIfNull(content);
+        if (cancellationToken.IsCancellationRequested || (presenter ?? Presenter) is not { } shownBy || SkUiDiagnostics.GetSurfaceRoot(anchor) is not { } surfaceRoot)
+            return false;
+        var look = SkUiLook.Current;
+        var rootBounds = SkUiDiagnostics.GetRootBounds(anchor) ?? Rect.Zero;
+        var origin = SkUiWindowMetrics.SurfaceOrigin(surfaceRoot);
+        var layout = SkUiPopupGeometry.Layout(new SkUiPopupPlacementInput(rootBounds.Offset(origin.X, origin.Y), rootBounds, SkUiWindowMetrics.WindowSize(surfaceRoot),
+            SkUiWindowMetrics.SafeAreaInsets(surfaceRoot), look.PopupMargin, look.PopupAnchorGap, SkUiPopupPlacement.Window, LayoutOptions.Center, LayoutOptions.Center,
+            preferredSize, double.PositiveInfinity, default, anchor.IsRightToLeft));
+        var request = new SkUiPopupRequest(anchor, surfaceRoot, content, layout)
+        {
+            OverlayColor = look.GetPopupOverlayColor(layout.Placement),
+            IsAnimated = !SkUiMotion.IsMotionReduced
+        };
+        request.CornerRadius = look.GetPopupCornerRadius(layout.Placement);
+        request.Shadow = look.GetPopupShadow(layout.Placement);
+        SkUiPopupParts.Fit(content, layout.Bounds, request.CornerRadius);
+        request.AvailableAreaChanged = () =>
+        {
+            if (!request.FollowsBounds)
+                return;
+            var bounds = SkUiPopupGeometry.Fitted(layout, layout.Bounds.Height, request.AvailableArea, look.PopupItemHeight, out _);
+            if (bounds == request.Bounds)
+                return;
+            SkUiPopupParts.Fit(content, bounds, request.CornerRadius);
+            request.MoveTo(bounds);
+        };
+        // A token can be cancelled on any thread, and a presenter closes on the UI thread only. Not through the synchronization context: a token waits there for it to run.
+        var dispatcher = Dispatcher.GetForCurrentThread();
+        await using var cancel = cancellationToken.Register(() =>
+        {
+            if (dispatcher?.IsDispatchRequired == true)
+                dispatcher.Dispatch(request.Cancel);
+            else
+                request.Cancel();
+        });
+        var shown = false;
+        try
+        {
+            opened?.Invoke(request);
+            shown = true;
+            await shownBy.ShowAsync(request, request.CloseRequested);
+        }
+        catch (OperationCanceledException)
+        {
+            // Closed: the same as returning.
+        }
+        catch (Exception exception)
+        {
+            Trace.WriteLine($"SkiaUi: showing a popup failed: {exception.Message}");
+        }
+        finally
+        {
+            request.MarkCompleted();
+        }
+        return shown;
+    }
+
     /// <summary>The presenter a control without its own uses: <see cref="Presenter"/>, else the action sheet fallback.</summary>
     internal static ISkUiPopupPresenter Resolve(ISkUiPopupPresenter? own)
     {

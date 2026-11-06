@@ -45,12 +45,12 @@ internal sealed class SkUiGestureSet(object owner)
             recognizers.Add(_swipe ??= new SkUiSwipeGestureRecognizer { Handler = RaiseSwiped, DirectionProvider = () => SwipeDirections });
         if (PanUpdated is not null)
         {
-            _pan ??= new SkUiPanGestureRecognizer { Handler = args => PanUpdated?.Invoke(owner, args) };
+            _pan ??= new SkUiPanGestureRecognizer { Handler = args => PanUpdated?.Invoke(owner, args), WaitsForPinch = () => PinchUpdated is not null && _pinch is { HasTwoPointers: true } };
             _pan.Axis = PanAxis;
             recognizers.Add(_pan);
         }
         if (PinchUpdated is not null)
-            recognizers.Add(_pinch ??= new SkUiPinchGestureRecognizer { Handler = args => PinchUpdated?.Invoke(owner, args) });
+            recognizers.Add(_pinch ??= new SkUiPinchGestureRecognizer { Handler = args => PinchUpdated?.Invoke(owner, args), ClaimsDrags = () => PanUpdated is not null });
         if (Custom is { Count: > 0 } custom)
             recognizers.AddRange(custom);
     }

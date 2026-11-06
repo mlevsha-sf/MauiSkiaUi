@@ -37,6 +37,7 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
     private double _characterSpacing;
     private TextDecorations _textDecorations;
     private TextTransform _textTransform = TextTransform.Default;
+    private List<SkUiInlineObject>? _inlineObjects; // what the spans last resolved show: they let go of what they drew when they leave, or when this label does
     private bool _shrinkToFit;
     private double _minimumFontScale = SkUiTextFit.DefaultMinimumScale;
     private bool _growToFill;
@@ -416,6 +417,8 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
         _spans = next;
         if (next.Length > 0 && SetProperty(ref _text, string.Empty, nameof(Text)))
             _displayText = string.Empty;
+        if (next.Length == 0)
+            ReleaseInlineObjects();
         _spanTap?.Cancel();
         OnPropertyChanged(nameof(Spans));
         InvalidateText();
@@ -427,6 +430,15 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
     {
         ArgumentNullException.ThrowIfNull(span);
         return SetSpans([.. _spans, span]);
+    }
+
+    /// <summary>The spans are gone for good. Plain text builds no rich text, so nothing else would let their objects go, and the rich layout's lines still hold them.</summary>
+    private void ReleaseInlineObjects()
+    {
+        if (_inlineObjects is null) return;
+        SkUiInlineObject.Replace(ref _inlineObjects, null);
+        _richLayout?.Release();
+        _richLayout = null;
     }
 
     private void ClearSpans()
@@ -468,6 +480,11 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
 
     private SkUiRichText BuildRichText()
     {
+        List<SkUiInlineObject>? inlineObjects = null;
+        foreach (var span in _spans)
+            if (!IsHtml && span.InlineObject is { } inlineObject)
+                (inlineObjects ??= []).Add(inlineObject);
+        SkUiInlineObject.Replace(ref _inlineObjects, inlineObjects);
         if (IsHtml)
             return SkUiHtml.ToRichText(HtmlRuns, _fontFamily, EffectiveFontSize, _fontAttributes, _characterSpacing, _lineHeight, _textColor, _textDecorations,
                 _fontAutoScalingEnabled);
@@ -477,13 +494,28 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
         {
             var attributes = span.FontAttributes ?? _fontAttributes;
             var transform = span.TextTransform != TextTransform.Default ? span.TextTransform : _textTransform;
-            builder.Add(SkUiTextTransform.Apply(span.Text, transform),
-                new SkUiTextSpanStyle(SkUiTypefaces.Resolve(span.FontFamily ?? _fontFamily, attributes), SkUiFontScaling.ScaleFontSize(span.FontSize ?? EffectiveFontSize, span.FontAutoScalingEnabled ?? _fontAutoScalingEnabled), attributes,
-                    span.CharacterSpacing ?? _characterSpacing, span.LineHeight ?? _lineHeight),
+            var size = SkUiFontScaling.ScaleFontSize(span.FontSize ?? EffectiveFontSize, span.FontAutoScalingEnabled ?? _fontAutoScalingEnabled);
+            builder.Add(span.InlineObject is null ? SkUiTextTransform.Apply(span.Text, transform) : SkUiInlineObject.ReplacementText,
+                new SkUiTextSpanStyle(SkUiTypefaces.Resolve(span.FontFamily ?? _fontFamily, attributes), size, attributes,
+                    span.CharacterSpacing ?? _characterSpacing, span.LineHeight ?? _lineHeight, span.BaselineShift * size, span.InlineObject),
                 new SkUiTextSpanPaint(ToSkColor(span.TextColor ?? _textColor), span.BackgroundColor is { } background ? ToSkColor(background) : default,
                     span.TextDecorations ?? _textDecorations));
         }
         return builder.Build();
+    }
+
+    /// <summary>The text screen readers read: an inline object reads as its span's text.</summary>
+    private string AccessibleRichText
+    {
+        get
+        {
+            foreach (var span in _spans)
+                if (span.InlineObject is not null)
+                    return string.Concat(_spans.Select(part => part.InlineObject is not null
+                        ? part.Text
+                        : SkUiTextTransform.Apply(part.Text, part.TextTransform != TextTransform.Default ? part.TextTransform : _textTransform)));
+            return RichText.Text;
+        }
     }
 
     /// <summary>The span drawn at <paramref name="point"/> (label coordinates), or <c>null</c> (beside the text, or no spans).</summary>
@@ -913,6 +945,7 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
         _chrome.ReleaseClip();
         _layout.Release();
         _richLayout?.Release();
+        SkUiInlineObject.Release(_inlineObjects);
     }
 
     private void UpdateDisplayText()
@@ -936,6 +969,6 @@ public class SkUiCoreLabel : SkUiCoreNode, ISkUiFontElement, ISkUiBorderElement
     {
         base.OnPopulateSemantics(info);
         info.Role = SkUiSemanticsRole.Text;
-        info.Text = UsesRichText ? RichText.Text : _displayText;
+        info.Text = UsesRichText ? AccessibleRichText : _displayText;
     }
 }
