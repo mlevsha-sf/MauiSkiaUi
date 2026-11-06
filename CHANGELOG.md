@@ -18,6 +18,8 @@ Publishing (the NuGet publish workflow, [docs/Releasing.md](docs/Releasing.md)) 
 
 ## Unreleased
 
+## 1.8.0
+
 ### New features
 
 - **Markdown:** a drawn Markdown view on both layers (`SkUiMarkdownView`, `SkUiCoreMarkdown`), in a new package, **SkiaUi.Maui.Markdown**, on Markdig. `SkiaUi.Maui` gets no new dependency.
